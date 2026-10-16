@@ -17,7 +17,7 @@ handl-platform = { git = "https://github.com/handl-lang/platform", rev = "200602
 plugin-engine = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
 handl-plugin-engine-exec = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
 handl-plugin-engine-exec-tree-walk = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
-handl-plugin-ffi = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
+handl-plugin-ffi = { git = "https://github.com/handl-lang/ffi", rev = "8ac212d1f047c3b368b244c7d505d45b06d30aec" }
 handl-runtime = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
 handl-value = { git = "https://github.com/handl-lang/platform", rev = "200602a6c25a3288f3b6266e0b8fc63822a76365" }
 cranelift = { version = "0.115", features = ["frontend", "native"] }
