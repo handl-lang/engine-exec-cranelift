@@ -73,6 +73,7 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use handl_language::Value as JsonValue;
 use handl_language::{ArrSource, Ast, LangError, Language, SchemeVersion, Term};
+use handl_plugin_engine_exec::native_ops;
 use plugin_engine::TermData;
 
 /// Type alias for a compiled native function pointer.
@@ -1647,7 +1648,15 @@ fn compile_arr(
     let n_val = builder.ins().iconst(types::I64, args.len() as i64);
     match source {
         ArrSource::Native => {
-            let op_idx = pools.add_name(op);
+            // `apply_native` cannot carry `lit`, so term-level lit ops
+            // (`elem`, `field_access`, `has_field`, `obj_except`,
+            // `arr_drop`, `json`) bake the literal into the op name as
+            // `<op>:<json-lit>` — the `route_on_type:` convention;
+            // `native_ops::apply_native_op` decodes it.
+            let op_name = lit
+                .and_then(|l| native_ops::bake_lit_name(op, l))
+                .unwrap_or_else(|| op.to_string());
+            let op_idx = pools.add_name(&op_name);
             let op_idx_val = builder.ins().iconst(types::I64, op_idx as i64);
 
             // Fix #7: Fast path for binary arithmetic/comparison ops on

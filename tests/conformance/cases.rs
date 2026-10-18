@@ -359,10 +359,15 @@ pub fn cases() -> Vec<Case> {
         cat,
         op("div", vec![lit(7), lit(2)]),
         None,
-        engines_ok_ti_div(json!(3), json!(3.5)),
-        "engines: int/int is truncating integer division \
-         (native_ops Num::Div); term-interp accumulates in f64 → 3.5. \
-         Known representation split — flagged for Phase B.",
+        [
+            Expect::Val(json!(3)),
+            Expect::Val(json!(3)),
+            Expect::Val(json!(3)),
+            Expect::Val(json!(3)),
+        ],
+        "int/int is truncating integer division on all four — \
+         term-interp's `div` moved from f64 accumulation to the shared \
+         Int semantics.",
     ));
     out.push(case(
         "div_zero",
@@ -373,10 +378,9 @@ pub fn cases() -> Vec<Case> {
             Expect::Err("division by zero"),
             Expect::Err("division by zero"),
             Expect::Err("division by zero"),
-            Expect::Err("invalid numeric result"),
+            Expect::Err("division by zero"),
         ],
-        "all reject; term-interp produces inf via f64 then fails \
-         `Number::from_f64` — different message, same verdict.",
+        "all reject with the same `division by zero` message.",
     ));
     out.push(case(
         "mod",
@@ -705,9 +709,16 @@ pub fn cases() -> Vec<Case> {
         cat,
         op("product", vec![lit(1), lit(2), lit(3)]),
         None,
-        engines_ok_ti_div(pairv(1, 2), json!([1, 2, 3])),
-        "engines keep args[0..2] only; term-interp's `product`/`array` arm \
-         returns *all* args — SUSPECTED DRIFT on >2 args.",
+        [
+            Expect::Val(json!([1, 2, 3])),
+            Expect::Val(json!([1, 2, 3])),
+            Expect::Val(json!([1, 2, 3])),
+            Expect::Val(json!([1, 2, 3])),
+        ],
+        "n-ary `product` is the fanout — an array of all args \
+         (term-interp semantics; the `match` lowering's extended \
+         `[v, in, keys]` dispatch pair relies on it). Only the 2-arg \
+         form yields a `Pair` for the `***` scheme.",
     ));
     out.push(case(
         "first_combinator",
@@ -899,11 +910,11 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(json!(20)),
             Expect::Val(json!(20)),
             Expect::Val(json!(20)),
-            Expect::Val(json!(20)),
+            Expect::Unsupported,
         ],
-        "engines evaluate arena child 1; term-interp projects index 1 of \
-         the incoming tuple — different notions of 'child' that coincide \
-         here by construction.",
+        "engines evaluate arena child 1; term-interp no longer carries \
+         `proj_child` (it is a lowerer placeholder now inlined at lower \
+         time) — capability gap.",
     ));
     out.push(case(
         "proj_child_or_oob",
@@ -1293,13 +1304,13 @@ pub fn cases() -> Vec<Case> {
         None,
         [
             Expect::Val(json!({"a": 1, "b": 2})),
-            Expect::Unsupported,
-            Expect::Unsupported,
+            Expect::Val(json!({"a": 1, "b": 2})),
+            Expect::Val(json!({"a": 1, "b": 2})),
             Expect::Val(json!({"a": 1, "b": 2})),
         ],
-        "alternating key/value `record`: tree-walk residual arm and \
-         term-interp's scheme form agree; bytecode/clif have no `record` \
-         op at all — a coverage gap on the compiled backends.",
+        "alternating key/value `record`: all four agree now that \
+         `record` lives in the shared `native_ops` table — the \
+         compiled backends' former coverage gap is closed.",
     ));
 
     // ================= Phase B batch (a): ops migrated to native_ops ====
@@ -1313,12 +1324,11 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(json!(6)),
             Expect::Val(json!(6)),
             Expect::Val(json!(6)),
-            Expect::DivErr("field literal"),
+            Expect::Val(json!(6)),
         ],
-        "args form (`eval.field-access`): engines resolve the field as \
-         `payload.field → args[1] → lit`. term-interp's `field_access` \
-         only takes the field as `lit` — a surface split, not a \
-         semantics split.",
+        "args form (`eval.field-access`): all four resolve the field as \
+         `payload.field → args[1] → lit`; term-interp gained the \
+         computed-key form with the `match` object-pattern ops.",
     ));
     out.push(case(
         "field_access_missing_key",
@@ -1329,10 +1339,11 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(Value::Null),
             Expect::Val(Value::Null),
             Expect::Val(Value::Null),
-            Expect::DivErr("field literal"),
+            Expect::DivErr("no field"),
         ],
         "unlike `index`, a missing object key yields `null` (not an \
-         error) — tree-walk semantics, now shared.",
+         error) on the engines — tree-walk semantics, now shared. \
+         term-interp errors (`no field`) — a pinned divergence.",
     ));
     out.push(case(
         "field_access_arr",
@@ -1343,9 +1354,9 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(json!(30)),
             Expect::Val(json!(30)),
             Expect::Val(json!(30)),
-            Expect::DivErr("field literal"),
+            Expect::Val(json!(30)),
         ],
-        "array + integer field → element access.",
+        "array + integer field → element access on all four.",
     ));
     out.push(case(
         "field_access_pair",
@@ -1356,11 +1367,12 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(json!(1)),
             Expect::Val(json!(1)),
             Expect::Val(json!(1)),
-            Expect::DivErr("field literal"),
+            Expect::DivErr("no field first"),
         ],
         "categorical `Pair` named views (`first`/`second`/`_tag`) — the \
-         compiled backends gained these arms via unification; only \
-         tree-walk had them before.",
+         compiled backends gained these arms via unification; \
+         term-interp's `field_access` has no Pair views — pinned \
+         divergence.",
     ));
     out.push(case(
         "field_access_str_join",
@@ -1371,10 +1383,10 @@ pub fn cases() -> Vec<Case> {
             Expect::Val(json!("str.length")),
             Expect::Val(json!("str.length")),
             Expect::Val(json!("str.length")),
-            Expect::DivErr("field literal"),
+            Expect::DivErr("no field length"),
         ],
         "string target joins `s.field` — the `str.length`-style host-path \
-         convention.",
+         convention; term-interp errors — pinned divergence.",
     ));
     out.push(case(
         "field_access_lit",
@@ -1388,14 +1400,14 @@ pub fn cases() -> Vec<Case> {
         None,
         [
             Expect::Val(json!(9)),
-            Expect::DivErr("string/number"),
-            Expect::DivErr("string/number"),
+            Expect::Val(json!(9)),
+            Expect::Val(json!(9)),
             Expect::Val(json!(9)),
         ],
-        "lit form (arrow-lowered `op_native_lit` surface): tree-walk and \
-         term-interp read the field from `lit`; bytecode/clif `NativeOp` \
-         cannot carry `lit`, so the field arrives `null` — documented \
-         plumbing gap, unchanged by the migration.",
+        "lit form (arrow-lowered `op_native_lit` surface): all four read \
+         the field from `lit` — the compiled backends carry it baked \
+         into the op name as `field_access:<json>` (`route_on_type:` \
+         convention), decoded by `native_ops::apply_native_op`.",
     ));
     out.push(case(
         "proj_rest",
