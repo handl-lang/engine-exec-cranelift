@@ -1,13 +1,13 @@
-//! # handl-plugin-engine-exec-cranelift
+//! # hnl-engine-exec-cranelift
 //!
 //! The **cranelift eval engine** for the eval operation (ADR-0044 §4, §7).
 //!
 //! This engine compiles [`handl_language::Term`] data to **native code** via
 //! [cranelift] and executes it via an in-memory JIT. It shares the same
 //! `Term` vocabulary as the
-//! [`handl_plugin_engine_exec_tree_walk`](handl_plugin_engine_exec_tree_walk)
+//! [`hnl_engine_exec_tree_walk`](hnl_engine_exec_tree_walk)
 //! reference interpreter and the
-//! [`handl_plugin_engine_exec_bytecode`](handl_plugin_engine_exec_bytecode)
+//! [`hnl_engine_exec_bytecode`](hnl_engine_exec_bytecode)
 //! bytecode engine; conformance tests verify all three produce **identical
 //! results**.
 //!
@@ -132,11 +132,11 @@ fn null_incoming_ptr() -> *mut TaggedValue {
 }
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language, SchemeVersion, Term, Value};
-use handl_plugin_engine_exec::native_ops::{
+use hnl_engine_exec::native_ops::{
     self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
 };
-use handl_plugin_engine_exec::pattern_match::{self, PatternMatchCtx};
-use handl_plugin_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
+use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
+use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
 use handl_value::{TaggedValue, either_value, is_either_left, is_either_right, tagged_to_value};
 
 // ---------------------------------------------------------------------------
@@ -1711,14 +1711,14 @@ unsafe fn apply_value_treewalk(
             arg_vals = arr.iter().cloned().collect();
         }
     }
-    let mut engine = handl_plugin_engine_exec_tree_walk::TreeWalkEngine::new();
+    let mut engine = hnl_engine_exec_tree_walk::TreeWalkEngine::new();
     if let Some(m) = ctx.modules.clone() {
         engine = engine.with_modules(m);
     }
     if let Some(r) = ctx.import_resolver.clone() {
         engine = engine.with_import_resolver(r);
     }
-    let mut env = handl_plugin_engine_exec_tree_walk::ScopeStack::new();
+    let mut env = hnl_engine_exec_tree_walk::ScopeStack::new();
     env.set_globals(Rc::clone(&ctx.env.globals));
     // Ambient node context for the dispatch-object paths' diagnostics —
     // the Arrow arm runs the arrow's own `body_def` arena.
@@ -2263,7 +2263,7 @@ fn arr_dispatch(ctx: &mut EvalCtx, op: &str, incoming: &TaggedValue) -> *mut Tag
                 )));
             }
         };
-        return match plugin_engine::interpret(&impl_term, tagged_to_value(incoming)) {
+        return match hnl_engine::interpret(&impl_term, tagged_to_value(incoming)) {
             Ok(v) => unsafe { box_value(TaggedValue::from(v)) },
             Err(e) => ctx.set_error(LangError::engine(format!(
                 "handler impl for op '{op}' failed: {e}"
@@ -2471,7 +2471,7 @@ pub unsafe extern "C" fn helper_v2_loop_check(ctx: *mut EvalCtx, result: *mut Ta
 /// The cranelift backend's [`NativeOpCtx`] — the engine-local globals the
 /// shared op table needs: the scope stack, AST-node evaluation (the
 /// interpreter fallback `eval_child_node`), and closure application. The
-/// op *semantics* live in `plugin-engine-exec::native_ops`; this struct
+/// op *semantics* live in `hnl-engine-exec::native_ops`; this struct
 /// only forwards services.
 struct ClCtx<'c> {
     ctx: &'c mut EvalCtx,
@@ -2697,7 +2697,7 @@ impl NativeOpCtx for ClCtx<'_> {
 /// Apply a v2 native op.
 ///
 /// The op semantics are defined once in
-/// `plugin-engine-exec::native_ops` (ADR-0044 §7): this backend supplies
+/// `hnl-engine-exec::native_ops` (ADR-0044 §7): this backend supplies
 /// only the globals — the `EvalCtx` scope stack, the AST-node interpreter
 /// fallback, and closure application — through [`ClCtx`]. The residual
 /// `match` below owns ops that still require this engine's machinery
@@ -2823,9 +2823,9 @@ mod tests {
     use super::*;
     use handl_language::{AstNode, EvalSchemeDef, Term};
     use handl_platform::{EvalContext, Function, Module, ModuleLookup};
-    use handl_plugin_engine_exec::EvalRequest;
+    use hnl_engine_exec::EvalRequest;
     use handl_plugin_module::ModuleRegistry;
-    use plugin_engine::{ArrSource, TermData};
+    use hnl_engine::{ArrSource, TermData};
     use serde_json::json;
 
     /// Build a simple AST for testing.
@@ -4956,8 +4956,8 @@ mod tests {
             },
         ];
 
-        let tw = handl_plugin_engine_exec_tree_walk::TreeWalkEngine::new();
-        let bc = handl_plugin_engine_exec_bytecode::BytecodeEngineV2::new();
+        let tw = hnl_engine_exec_tree_walk::TreeWalkEngine::new();
+        let bc = hnl_engine_exec_bytecode::BytecodeEngineV2::new();
         let cl = CraneliftEngineV2::new();
 
         for (name, lang, ast) in cases {

@@ -9,7 +9,7 @@
 //! Divergence notes cite the implementation site so a Phase-B reviewer can
 //! jump straight to the drift.
 
-use plugin_engine::{ArrSource, TermData};
+use hnl_engine::{ArrSource, TermData};
 use serde_json::{Value, json};
 
 use crate::harness::{Case, Expect, ProbeNode};

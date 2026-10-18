@@ -3,7 +3,7 @@
 //!
 //! Runs *identical* [`TermData`] inputs through all four evaluators —
 //! the tree-walk, bytecode, and Cranelift `EvalEngine`s plus the pure
-//! `plugin_engine::term_interpreter` — and reports a per-case status
+//! `hnl_engine::term_interpreter` — and reports a per-case status
 //! matrix: `PASS` / `DIVERGENT` / `UNSUPPORTED` / `FAIL`.
 //!
 //! # Mechanics
@@ -22,7 +22,7 @@
 //! `countdown_step`, `first`, `sum`, …) see the same value everywhere.
 //! When `input` is `None` the body runs bare. The pure term
 //! interpreter receives the identical `Term` via
-//! [`plugin_engine::term_interpreter::interpret`].
+//! [`hnl_engine::term_interpreter::interpret`].
 //!
 //! `body` may address probe children positionally via `proj_child` /
 //! `paren` / `index` node-form, or by named role via `Term::Child` —
@@ -46,11 +46,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use handl_language::{Ast, AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language};
-use handl_plugin_engine_exec::{EvalEngine, EvalRequest};
-use handl_plugin_engine_exec_bytecode::BytecodeEngine;
-use handl_plugin_engine_exec_cranelift::CraneliftEngine;
-use handl_plugin_engine_exec_tree_walk::TreeWalkEngine;
-use plugin_engine::TermData;
+use hnl_engine_exec::{EvalEngine, EvalRequest};
+use hnl_engine_exec_bytecode::BytecodeEngine;
+use hnl_engine_exec_cranelift::CraneliftEngine;
+use hnl_engine_exec_tree_walk::TreeWalkEngine;
+use hnl_engine::TermData;
 use serde_json::{Value, json};
 
 /// The four interpretation paths, in report column order.
@@ -379,7 +379,7 @@ fn run_term_interp(case: &Case) -> Outcome {
     // The `Seq{0, Arr(input), _}` wrapper supplies the input; the
     // interpreter's own `input` parameter is unused context (Null).
     match catch_unwind(AssertUnwindSafe(|| {
-        plugin_engine::term_interpreter::interpret(&term, Value::Null)
+        hnl_engine::term_interpreter::interpret(&term, Value::Null)
     })) {
         Ok(Ok(v)) => Outcome::Val(v),
         Ok(Err(e)) => Outcome::Err(e),

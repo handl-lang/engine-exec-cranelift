@@ -1,13 +1,13 @@
 //! Cross-interpreter conformance suite (Phase A — evaluator
 //! unification).
 //!
-//! Runs identical [`plugin_engine::TermData`] inputs through all four
+//! Runs identical [`hnl_engine::TermData`] inputs through all four
 //! evaluators — tree-walk, bytecode, Cranelift, and the pure
-//! `plugin_engine::term_interpreter` — and diffs the results.
+//! `hnl_engine::term_interpreter` — and diffs the results.
 //!
-//! * `cargo test -p handl-plugin-engine-exec-cranelift --test conformance`
+//! * `cargo test -p hnl-engine-exec-cranelift --test conformance`
 //!   asserts the pinned matrix (any `FAIL` cell = undocumented drift).
-//! * `cargo test -p handl-plugin-engine-exec-cranelift --test conformance
+//! * `cargo test -p hnl-engine-exec-cranelift --test conformance
 //!   -- --nocapture` prints the full report table with actual outcomes
 //!   for every divergent/unsupported cell.
 //!
@@ -15,7 +15,7 @@
 //!
 //! ## Suspected bugs
 //!
-//! * **Bytecode incoming plumbing** (`plugin-engine-exec-bytecode/src/vm.rs`,
+//! * **Bytecode incoming plumbing** (`hnl-engine-exec-bytecode/src/vm.rs`,
 //!   `op_uses_incoming`): the 0-arg `NativeOp` arm reads `incoming` only
 //!   for a hardcoded op list.
 //!   - Ops that consume `incoming` but are absent from the list

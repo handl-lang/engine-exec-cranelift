@@ -73,8 +73,8 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use handl_language::Value as JsonValue;
 use handl_language::{ArrSource, Ast, LangError, Language, SchemeVersion, Term};
-use handl_plugin_engine_exec::native_ops;
-use plugin_engine::TermData;
+use hnl_engine_exec::native_ops;
+use hnl_engine::TermData;
 
 /// Type alias for a compiled native function pointer.
 ///
