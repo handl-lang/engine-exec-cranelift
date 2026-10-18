@@ -203,7 +203,7 @@ handl-lib-url-whatwg = { path = "../lib-url-whatwg" }
 handl-lib-utils = { path = "../lib-utils" }
 
 [patch."https://github.com/handl-lang/native"]
-hnl-engine-exec-cranelift = { path = "../native/modules/exec-cranelift" }
+hnl-engine-exec-cranelift = { path = "../engine-exec-cranelift" }
 
 [patch."https://github.com/handl-lang/otlp"]
 handl-plugin-lib-otlp = { path = "../otlp/modules/lib-otlp" }
