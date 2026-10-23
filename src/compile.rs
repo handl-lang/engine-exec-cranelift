@@ -1118,14 +1118,29 @@ fn compile_scheme_td(
             );
             Ok((builder.inst_results(call)[0], false))
         }
-        // `handle body with target = impl_` (ADR-0076): eliminate the
-        // handler at compile time, then compile the resulting handler-free
-        // scheme. Uses `eliminate_and_check` to surface unhandled
-        // capabilities as a compile-time error, matching the tree-walk,
-        // bytecode, and typecheck engines. `eliminate_and_check` operates on
-        // the `Term` enum, so the `TermData` is converted back via
-        // [`TermData::to_term`] for this one case.
+        // `handle body with target = impl_` (ADR-0076). An *unnamed*
+        // target (`""` — surface `handle <body> with <handler>`) is a
+        // dynamic-extent handler install: capability substitution cannot
+        // see it, so the shared `handle_dyn` op runs the runtime
+        // semantics through `apply_native` (handler-stack push → body
+        // eval → `IO(sig)` former interpretation → carried-handler
+        // attach — the tree-walk `Handle` arm's behavior). A *named*
+        // target still eliminates statically via
+        // `Term::eliminate_handlers` (a `TermData` is converted back via
+        // [`TermData::to_term`] for this one case).
         "Handle" => {
+            let target = td.get_str("target").unwrap_or_default();
+            if target.is_empty() {
+                let op_idx = pools.add_name("handle_dyn");
+                let op_idx_val = builder.ins().iconst(types::I64, op_idx as i64);
+                let arg_ptrs = builder.ins().iconst(types::I64, 0);
+                let n_val = builder.ins().iconst(types::I64, 0);
+                let call = builder.ins().call(
+                    helpers.apply_native,
+                    &[ctx_param, op_idx_val, arg_ptrs, n_val, incoming_val],
+                );
+                return Ok((builder.inst_results(call)[0], false));
+            }
             let term = td.to_term().map_err(|e| LangError::engine(e.to_string()))?;
             let eliminated = term.eliminate_handlers();
             compile_scheme(

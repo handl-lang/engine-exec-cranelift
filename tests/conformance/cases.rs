@@ -1282,10 +1282,17 @@ pub fn cases() -> Vec<Case> {
         cat,
         TermData::child("value"),
         None,
-        tw_only(json!(33)),
-        "`Term::Child` (named-role projection, ADR-0081): tree-walk \
-         resolves via `lang.child_role_index_for`; bytecode/clif compile \
-         it as `NotImplemented`; term-interp rejects the variant.",
+        [
+            Expect::Val(json!(33)),
+            Expect::Val(json!(33)),
+            Expect::Unsupported,
+            Expect::Unsupported,
+        ],
+        "`Term::Child` (named-role projection, ADR-0081): tree-walk and \
+         bytecode resolve via `lang.child_role_index_for` (bytecode emits \
+         `EvalChild` — the `handle_dyn`/named-`Handle` port needed it); \
+         clif still compiles it as `NotImplemented` (its compile arm has \
+         no `lang`/`node` context); term-interp rejects the variant.",
     ));
     out.push(case(
         "iter",

@@ -432,6 +432,7 @@ fn run_native(
         names: names.to_vec(),
         error: None,
         ffi_table,
+        handler_stack: Vec::new(),
     };
     ctx.env.set_globals(Rc::new(global_scope));
 
@@ -532,6 +533,12 @@ pub struct EvalCtx {
     /// of the general `helper_v2_call_foreign` path (which goes through
     /// `ModuleLookup` trait object dispatch).
     ffi_table: Vec<handl_plugin_ffi::FfiOpFunction>,
+    /// The runtime handler stack (ADR-0076 dynamic extent): the
+    /// `handle_dyn` op pushes the impl value for the body's extent;
+    /// `arr_dispatch` and the `IO(sig)` former interpretation resolve
+    /// ops through it (innermost-first), matching the tree-walk
+    /// `handler_stack`.
+    handler_stack: Vec<TaggedValue>,
 }
 
 impl EvalCtx {
@@ -597,6 +604,7 @@ impl EvalCtx {
             names,
             error: None,
             ffi_table: Vec::new(),
+            handler_stack: Vec::new(),
         }
     }
 }
@@ -2239,16 +2247,21 @@ fn apply_payload_op(
 }
 
 /// Dispatch a payload-resolved `arr <op>` against a concrete operand.
-/// Mirrors the tree-walk `arr_dispatch`: a handler implementation carried
-/// by the operand's `impls` (or a same-named field) wins; otherwise the
-/// operand's `Pair` spine is flattened into positional args for the
-/// native op.
-///
-/// The runtime handler stack the tree-walk also consults does not exist
-/// in this backend — `Handle` terms are eliminated at compile time by
-/// `Term::eliminate_handlers`.
+/// Mirrors the tree-walk `arr_dispatch`: a handler implementation
+/// resolved through the runtime handler stack (innermost-first) or
+/// carried by the operand's `impls` (or a same-named field) wins;
+/// otherwise the operand's `Pair` spine is flattened into positional
+/// args for the native op. `handle_dyn` pushes handlers for the body's
+/// dynamic extent; `handle` terms whose target is a *named* capability
+/// still eliminate statically via `Term::eliminate_handlers`.
 fn arr_dispatch(ctx: &mut EvalCtx, op: &str, incoming: &TaggedValue) -> *mut TaggedValue {
-    if let Some(impl_val) = handler_impl(incoming, op) {
+    let impl_val = ctx
+        .handler_stack
+        .iter()
+        .rev()
+        .find_map(|h| handler_impl(h, op))
+        .or_else(|| handler_impl(incoming, op));
+    if let Some(impl_val) = impl_val {
         if matches!(impl_val, TaggedValue::Arrow { .. }) {
             // `incoming` is the single operand — pass it through whole
             // (tree-walk `apply_app(&impl_val, &[incoming])`), so no
@@ -2695,6 +2708,22 @@ impl NativeOpCtx for ClCtx<'_> {
         // op invokes it here — inside the `helper_v2_apply_native` Rust
         // helper — rather than across the JIT boundary.
         self.ctx.import_resolver.as_deref()
+    }
+
+    fn handler_push(&mut self, handler: TaggedValue) {
+        self.ctx.handler_stack.push(handler);
+    }
+
+    fn handler_pop(&mut self) {
+        self.ctx.handler_stack.pop();
+    }
+
+    fn handler_lookup(&self, op: &str) -> Option<TaggedValue> {
+        self.ctx
+            .handler_stack
+            .iter()
+            .rev()
+            .find_map(|h| handler_impl(h, op))
     }
 }
 
