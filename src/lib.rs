@@ -627,6 +627,10 @@ impl PatternMatchCtx for EvalCtx {
             .map(|v| TaggedValue::from(v.clone()))
     }
 
+    fn scope_value(&self, name: &str) -> Option<TaggedValue> {
+        self.env.lookup(name).cloned()
+    }
+
     fn lang(&self) -> Option<&Language> {
         // SAFETY: `self.lang` is a valid pointer for the duration of
         // evaluation (run_native); it is null for the standalone driver,
