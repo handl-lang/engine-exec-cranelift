@@ -1042,6 +1042,17 @@ pub unsafe extern "C" fn helper_call_foreign(
             arg_vals.push(take_value(arg_ptr));
         }
 
+        // ADR-0158: `perform` under a covering handler dispatches
+        // in-flight before the `IO` mint.
+        if native_ops::is_perform_callee(&name) {
+            let mut cl = ClCtx { ctx: &mut *ctx };
+            match native_ops::perform_dispatch(&mut cl, &arg_vals) {
+                Ok(Some(v)) => return box_value(v),
+                Ok(None) => {}
+                Err(e) => return ctx.set_error(e),
+            }
+        }
+
         // Look up the module function.
         let modules = match ctx.modules.as_ref() {
             Some(m) => Rc::clone(m),
@@ -1128,6 +1139,15 @@ pub unsafe extern "C" fn helper_v2_call_ffi_raw(
     }
 }
 
+/// Remaining-stack budget at which [`stacker::maybe_grow`] moves the next
+/// nested node eval onto a fresh segment — mirrors the tree-walk's
+/// `STACK_RED_ZONE`.
+const STACK_RED_ZONE: usize = 4 * 1024 * 1024;
+
+/// Fresh stack segment allocated by [`stacker::maybe_grow`] on overflow
+/// (see [`STACK_RED_ZONE`]).
+const STACK_SEGMENT: usize = 8 * 1024 * 1024;
+
 /// Evaluate a child node by arena index from within a Rust helper (e.g.
 /// `apply_prim`).
 ///
@@ -1137,6 +1157,21 @@ pub unsafe extern "C" fn helper_v2_call_ffi_raw(
 /// reclaims the boxed result. Returns the evaluated [`TaggedValue`] or sets
 /// `ctx.error` and returns `Err`.
 fn eval_child_node(ctx: &mut EvalCtx, arena_idx: usize) -> Result<TaggedValue, LangError> {
+    // Growable-stack seam (mirrors the tree-walk `STACK_RED_ZONE`):
+    // nested node evals cycle Rust → JIT → `helper_v2_eval_child` →
+    // `eval_child_node` → JIT, so checking at this one boundary bounds
+    // every level — the JIT'd child runs on the grown segment too.
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || {
+        eval_child_node_unguarded(ctx, arena_idx)
+    })
+}
+
+/// The recursive body of [`eval_child_node`], run under
+/// [`stacker::maybe_grow`].
+fn eval_child_node_unguarded(
+    ctx: &mut EvalCtx,
+    arena_idx: usize,
+) -> Result<TaggedValue, LangError> {
     let func = match ctx.compiled.get(&arena_idx).copied() {
         Some(f) => f,
         None => {
@@ -1783,6 +1818,16 @@ fn prim_v2_flow(ctx: &mut EvalCtx, args: &[TaggedValue]) -> *mut TaggedValue {
         vec![input.clone()]
     };
     if let TaggedValue::Str(name) = callee {
+        // ADR-0158: `perform` under a covering handler dispatches
+        // in-flight before the `IO` mint.
+        if native_ops::is_perform_callee(name) {
+            let mut cl = ClCtx { ctx: &mut *ctx };
+            match native_ops::perform_dispatch(&mut cl, &actual_args) {
+                Ok(Some(v)) => return unsafe { box_value(v) },
+                Ok(None) => {}
+                Err(e) => return ctx.set_error(e),
+            }
+        }
         let modules = match ctx.modules.as_ref() {
             Some(m) => m,
             None => {
@@ -2714,8 +2759,8 @@ impl NativeOpCtx for ClCtx<'_> {
         self.ctx.handler_stack.push(handler);
     }
 
-    fn handler_pop(&mut self) {
-        self.ctx.handler_stack.pop();
+    fn handler_pop(&mut self) -> Option<TaggedValue> {
+        self.ctx.handler_stack.pop()
     }
 
     fn handler_lookup(&self, op: &str) -> Option<TaggedValue> {
@@ -2724,6 +2769,26 @@ impl NativeOpCtx for ClCtx<'_> {
             .iter()
             .rev()
             .find_map(|h| handler_impl(h, op))
+    }
+
+    fn handler_acc(&self, op: &str) -> Option<TaggedValue> {
+        native_ops::covering_frame_acc(&self.ctx.handler_stack, op)
+    }
+
+    fn handler_set_acc(&mut self, op: &str, s: TaggedValue) {
+        native_ops::covering_frame_set_acc(&mut self.ctx.handler_stack, op, s);
+    }
+
+    fn run_delimited(
+        &mut self,
+        target: AstRef,
+        handler: &TaggedValue,
+        frame_handler: &TaggedValue,
+    ) -> Result<TaggedValue, LangError> {
+        // One-shot semantics (ADR-0158): shared body-eval + `IO`
+        // interpretation + `return`/`acc` postlude + carried attach —
+        // same delegation as `TwCtx::run_delimited`/`VmCtx::run_delimited`.
+        native_ops::run_delimited_default(self, target, handler, frame_handler)
     }
 }
 
@@ -2806,6 +2871,22 @@ fn apply_native_v2(
                     "call_host: callee must be a string".to_string(),
                 ));
             };
+            // ADR-0158: `perform(op, arg)` under a covering handler
+            // dispatches in-flight — consult the runtime handler stack
+            // before the `IO` mint; uncovered ops fall through to
+            // `PerformFn`'s residual mint.
+            if native_ops::is_perform_callee(&callee) {
+                let arg_tvs: Vec<TaggedValue> = match arg_src {
+                    Some(TaggedValue::Arr(arr)) => arr.to_vec(),
+                    _ => Vec::new(),
+                };
+                let mut cl = ClCtx { ctx: &mut *ctx };
+                match native_ops::perform_dispatch(&mut cl, &arg_tvs) {
+                    Ok(Some(v)) => return unsafe { box_value(v) },
+                    Ok(None) => {}
+                    Err(e) => return ctx.set_error(e),
+                }
+            }
             let modules = match ctx.modules.as_ref() {
                 Some(m) => m,
                 None => {
