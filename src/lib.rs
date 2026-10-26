@@ -1824,7 +1824,20 @@ fn apply_closure_value_opts(
                         other => elems.push(other.clone()),
                     }
                 }
-                elems.extend(arg_vals);
+                // A `call` packs its positional args into one array
+                // (`proj_rest`), so `Type.rec(m, c0..)(v)` arrives as
+                // `[Arr([v])]`. Unpack it, or the flat `__in` tuple ends up
+                // with `[v]` in its `v` slot and the fold asks an array for
+                // `.__ctor__`. `flow`/direct `__term__` callers pass
+                // `unpack_arr = false` and are untouched.
+                let mut applied = arg_vals;
+                if unpack_arr
+                    && applied.len() == 1
+                    && let TaggedValue::Arr(items) = &applied[0]
+                {
+                    applied = items.iter().cloned().collect();
+                }
+                elems.extend(applied);
                 let term_val = term_val.clone();
                 let tuple = TaggedValue::Arr(Rc::from(elems));
                 // `unpack_arr = false`: `__in` binds to the whole tuple,
