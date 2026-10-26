@@ -132,12 +132,12 @@ fn null_incoming_ptr() -> *mut TaggedValue {
 }
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language, SchemeVersion, Term, Value};
+use handl_value::{TaggedValue, either_value, is_either_left, is_either_right, tagged_to_value};
 use hnl_engine_exec::native_ops::{
     self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
 };
 use hnl_engine_exec::pattern_match::{self, PatternMatchCtx};
 use hnl_engine_exec::{EvalEngine, EvalRequest, ImportResolver};
-use handl_value::{TaggedValue, either_value, is_either_left, is_either_right, tagged_to_value};
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -378,6 +378,7 @@ impl EvalEngine for CraneliftEngine {
 /// Alias for backward compatibility (ADR-0052 cutover).
 pub type CraneliftEngineV2 = CraneliftEngine;
 
+#[allow(clippy::too_many_arguments)]
 /// Execute pre-compiled native functions against `lang` and `ast`.
 ///
 /// Builds an [`EvalCtx`] from the compiled function-pointer map and constant
@@ -401,6 +402,15 @@ fn run_native(
     ffi_ops: &HashMap<String, handl_plugin_ffi::FfiOpFunction>,
     globals: &HashMap<String, Value>,
 ) -> Result<Value, LangError> {
+    // Finalize the multi-shot `resume` bookkeeping when the outermost eval
+    // on this thread ends (ADR-0158): suspended journals stay live for the
+    // duration of the eval (an escaped `resume` must remain callable) and
+    // are reclaimed here; nested evals only bump the shared depth.
+    let _resume_scope = native_ops::ResumeTableScope::enter(|| {
+        RESUME_JOURNALS.with(|j| j.borrow_mut().clear());
+        RESUME_SUSPENSIONS.with(|s| s.borrow_mut().clear());
+        ACTIVE_EVAL_CTX.with(|c| c.set(std::ptr::null_mut()));
+    });
     // Build the evaluation context.
     // Convert literals from serde_json::Value to TaggedValue at the boundary.
     let literals: Vec<TaggedValue> = literals.iter().cloned().map(TaggedValue::from).collect();
@@ -557,8 +567,15 @@ impl EvalCtx {
     }
 
     /// Set the deferred error and return a null pointer (for helper use).
+    ///
+    /// A multi-shot `Suspended` (ADR-0158) is control flow, not a node
+    /// failure: once a run suspends, a later failure from a sibling that
+    /// still ran must not replace it — the journal driver keys off the
+    /// suspension id.
     fn set_error(&mut self, err: LangError) -> *mut TaggedValue {
-        self.error = Some(err);
+        if !matches!(self.error, Some(LangError::Suspended { .. })) {
+            self.error = Some(err);
+        }
         std::ptr::null_mut()
     }
 
@@ -629,10 +646,7 @@ impl PatternMatchCtx for EvalCtx {
     }
 
     fn global_value(&self, name: &str) -> Option<TaggedValue> {
-        self.env
-            .globals
-            .get(name)
-            .map(|v| TaggedValue::from(v.clone()))
+        self.env.globals.get(name).cloned()
     }
 
     fn scope_value(&self, name: &str) -> Option<TaggedValue> {
@@ -658,6 +672,7 @@ impl PatternMatchCtx for EvalCtx {
 /// shared by reference (`Rc::clone`) instead of deep-cloned on every arrow
 /// call. The innermost scope is mutated via `Rc::make_mut`, which is
 /// cheap because it is always freshly pushed (refcount 1).
+#[derive(Clone)]
 struct ScopeStack {
     /// The stack of scope frames.
     scopes: Vec<Rc<FxHashMap<Rc<str>, TaggedValue>>>,
@@ -741,16 +756,16 @@ impl ScopeStack {
                 // owned (refcount 1) during block eval, so `Rc::make_mut`
                 // is a cheap in-place mutation.
                 let slot = Rc::make_mut(scope).get_mut(name);
-                if let Some(slot) = slot {
-                    if !handl_value::eq(slot, &value) {
-                        *slot = value;
-                        // Only cross-scope writes are fixpoint-relevant: an
-                        // update to a binding defined earlier in the *same*
-                        // innermost scope is ordinary sequencing and must
-                        // not keep a `rec` pass alive.
-                        if i < last {
-                            self.enclosing_updated = true;
-                        }
+                if let Some(slot) = slot
+                    && !handl_value::eq(slot, &value)
+                {
+                    *slot = value;
+                    // Only cross-scope writes are fixpoint-relevant: an
+                    // update to a binding defined earlier in the *same*
+                    // innermost scope is ordinary sequencing and must
+                    // not keep a `rec` pass alive.
+                    if i < last {
+                        self.enclosing_updated = true;
                     }
                 }
                 return;
@@ -870,6 +885,12 @@ unsafe fn take_value(ptr: *mut TaggedValue) -> TaggedValue {
 ///
 /// Used by the `Loop` combinator to save a clone of the incoming value before
 /// `pair` consumes the original (Fix #8: pre-existing loop double-free fix).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_clone(
     _ctx: *mut EvalCtx,
@@ -891,6 +912,12 @@ pub unsafe extern "C" fn helper_v2_clone(
 // ---------------------------------------------------------------------------
 
 /// Push a literal value (from the constant pool) as a boxed clone.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_push_literal(
     ctx: *mut EvalCtx,
@@ -909,6 +936,12 @@ pub unsafe extern "C" fn helper_push_literal(
 }
 
 /// Load a variable by name index from the scope stack.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_load_payload(ctx: *mut EvalCtx) -> *mut TaggedValue {
     unsafe {
@@ -924,6 +957,12 @@ pub unsafe extern "C" fn helper_load_payload(ctx: *mut EvalCtx) -> *mut TaggedVa
 ///
 /// Reads `node.payload["children"][n]` to get the child's `AstRef`, then
 /// calls the child's pre-compiled native function.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_pop_scope(ctx: *mut EvalCtx) {
     unsafe {
@@ -933,6 +972,12 @@ pub unsafe extern "C" fn helper_pop_scope(ctx: *mut EvalCtx) {
 }
 
 /// Push a new empty scope for the `vau` parameter bindings (ADR-0041 §6).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_drop_value(val: *mut TaggedValue) {
     unsafe {
@@ -946,6 +991,12 @@ pub unsafe extern "C" fn helper_drop_value(val: *mut TaggedValue) {
 ///
 /// `false`, `null`, `0`, and `""` are falsy; everything else is truthy.
 /// Returns 1 for truthy, 0 for falsy.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_is_truthy(val: *const TaggedValue) -> u8 {
     unsafe {
@@ -960,6 +1011,12 @@ pub unsafe extern "C" fn helper_is_truthy(val: *const TaggedValue) -> u8 {
 /// Apply a closure value to argument values.
 ///
 /// The callee and all argument value pointers are consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_apply_closure(
     ctx: *mut EvalCtx,
@@ -1003,6 +1060,12 @@ pub unsafe extern "C" fn helper_apply_closure(
 /// Apply a primitive operation (by name index).
 ///
 /// All argument value pointers are consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_call_foreign(
     ctx: *mut EvalCtx,
@@ -1045,7 +1108,18 @@ pub unsafe extern "C" fn helper_call_foreign(
         // ADR-0158: `perform` under a covering handler dispatches
         // in-flight before the `IO` mint.
         if native_ops::is_perform_callee(&name) {
+            // Pass the ambient node so replay-mismatch diagnostics point
+            // at the `perform` call site.
+            let node = ctx.current_node().cloned().ok();
             let mut cl = ClCtx { ctx: &mut *ctx };
+            // Multi-shot resumption (ADR-0158 workstream): a journal-bound
+            // ≥2-ary clause covering the op replays or suspends before the
+            // one-shot dispatch below.
+            match journal_perform_or_suspend(&mut cl, &arg_vals, node.as_ref()) {
+                Ok(Some(v)) => return box_value(v),
+                Ok(None) => {}
+                Err(e) => return ctx.set_error(e),
+            }
             match native_ops::perform_dispatch(&mut cl, &arg_vals) {
                 Ok(Some(v)) => return box_value(v),
                 Ok(None) => {}
@@ -1088,6 +1162,12 @@ pub unsafe extern "C" fn helper_call_foreign(
 /// The `ffi_idx` is an index into `ctx.ffi_table`, which is built at engine
 /// construction time from the registered FFI bindings. All argument value
 /// pointers are consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_call_ffi_raw(
     ctx: *mut EvalCtx,
@@ -1297,6 +1377,12 @@ impl handl_runtime::CompileEngine for CraneliftCompileEngine {
 /// Push a literal value (from the constant pool) as a boxed clone.
 ///
 /// Pushes a literal value (from the constant pool) as a boxed clone.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_push_literal(
     ctx: *mut EvalCtx,
@@ -1309,6 +1395,12 @@ pub unsafe extern "C" fn helper_v2_push_literal(
 ///
 /// Loads a variable from the environment. An unbound variable returns the name as
 /// a string value (matching the v2 tree-walk convention), not an error.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_load_var(
     ctx: *mut EvalCtx,
@@ -1335,6 +1427,12 @@ pub unsafe extern "C" fn helper_v2_load_var(
 ///
 /// Loads the current node's payload as a variable name. An unbound variable returns the
 /// name as a string value (matching the v2 tree-walk convention).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_load_payload_var(ctx: *mut EvalCtx) -> *mut TaggedValue {
     unsafe {
@@ -1357,6 +1455,12 @@ pub unsafe extern "C" fn helper_v2_load_payload_var(ctx: *mut EvalCtx) -> *mut T
 /// Load the current node's payload directly (no-scheme fallback).
 ///
 /// Loads the current node's payload as a value.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_load_payload(ctx: *mut EvalCtx) -> *mut TaggedValue {
     unsafe { helper_load_payload(ctx) }
@@ -1374,6 +1478,12 @@ pub unsafe extern "C" fn helper_v2_load_payload(ctx: *mut EvalCtx) -> *mut Tagge
 /// lets a first-class `arr <op>` child (`eval.arr`, `Op { name: "$payload" }`)
 /// see an absent incoming and produce the `__arr__` dispatch object that
 /// `apply_closure_value_opts` applies later.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_eval_child(
     ctx: *mut EvalCtx,
@@ -1442,6 +1552,12 @@ pub unsafe extern "C" fn helper_v2_eval_child(
 ///
 /// This is the v2 `extend_env` op. The scope is popped by the enclosing `Seq`
 /// (or by the top-level eval if bare).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_extend_env(
     ctx: *mut EvalCtx,
@@ -1475,6 +1591,12 @@ pub unsafe extern "C" fn helper_v2_extend_env(
 /// Extend the environment with a `$payload` name: reads
 /// `node.payload["name"]` as the bind name, pushes a scope, binds the incoming
 /// value, and returns a boxed clone of the incoming value.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_extend_env_payload(
     ctx: *mut EvalCtx,
@@ -1518,6 +1640,12 @@ pub unsafe extern "C" fn helper_v2_extend_env_payload(
 /// Pop the innermost scope.
 ///
 /// Pops the current scope from the environment stack.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_pop_scope(ctx: *mut EvalCtx) {
     unsafe { helper_pop_scope(ctx) }
@@ -1526,9 +1654,41 @@ pub unsafe extern "C" fn helper_v2_pop_scope(ctx: *mut EvalCtx) {
 /// Reclaim a boxed [`Value`] pointer, freeing the allocation.
 ///
 /// Drops a boxed value (decrements refcount).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_drop_value(val: *mut TaggedValue) {
     unsafe { helper_drop_value(val) }
+}
+
+/// Whether the deferred error is a multi-shot `LangError::Suspended`.
+///
+/// Compiled code calls this between operand evaluations: a suspension is
+/// control flow (ADR-0158), so the generated function unwinds immediately
+/// instead of evaluating the remaining operands — the run's journal cursor
+/// stays at the suspending op, exactly like the tree-walk's `?`
+/// propagation. Ordinary deferred errors keep the eager-evaluation
+/// behavior (they are reported once, at the node boundary).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn helper_v2_error_is_suspended(ctx: *mut EvalCtx) -> i64 {
+    // SAFETY: `ctx` is the valid `*mut EvalCtx` the compiled function was
+    // called with; only the deferred error is read.
+    let ctx = unsafe { &*ctx };
+    i64::from(
+        ctx.error
+            .as_ref()
+            .is_some_and(|e| e.suspension_id().is_some()),
+    )
 }
 
 /// Apply a closure value (or host function) to argument values.
@@ -1539,6 +1699,12 @@ pub unsafe extern "C" fn helper_v2_drop_value(val: *mut TaggedValue) {
 /// incoming value is a boxed `Null` (closure bodies are evaluated as fresh
 /// computations). For host-function string callees, dispatches to the module
 /// registry.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_apply_closure(
     ctx: *mut EvalCtx,
@@ -1622,10 +1788,11 @@ fn apply_closure_value_opts(
             // on `[1, 2]`). `flow`/`__term__` callers (`unpack_arr =
             // false`) keep passing the input through untouched.
             let mut dispatch_args = arg_vals;
-            if unpack_arr && dispatch_args.len() == 1 {
-                if let TaggedValue::Arr(arr) = &dispatch_args[0] {
-                    dispatch_args = arr.iter().cloned().collect();
-                }
+            if unpack_arr
+                && dispatch_args.len() == 1
+                && let TaggedValue::Arr(arr) = &dispatch_args[0]
+            {
+                dispatch_args = arr.iter().cloned().collect();
             }
             let incoming = dispatch_args.first().cloned().unwrap_or(TaggedValue::Null);
             return arr_dispatch(ctx, &op, &incoming);
@@ -1664,6 +1831,44 @@ fn apply_closure_value_opts(
                 // not its first element.
                 return apply_closure_value_opts(ctx, term_val, vec![tuple], false);
             }
+        }
+        // Multi-shot resumption (ADR-0158): a `resume` value
+        // (`{"__resume__": <id>}`) drives a fresh journal re-run of the
+        // suspended `handle` body. Intercepted here (the central
+        // application seam) before the `arr <op>`/Arrow arms.
+        if let TaggedValue::Obj(map) = &closure_val
+            && let Some(id_val) = map.get(RESUME_KEY)
+        {
+            let id = match resume_id_of(id_val) {
+                Some(id) => id,
+                None => {
+                    ctx.set_error(LangError::engine(format!(
+                        "resume: malformed resumption value {id_val:?}"
+                    )));
+                    return std::ptr::null_mut();
+                }
+            };
+            // Mirror the arrow path's single-`Arr` unpack: a `call`
+            // packs its positional args into one array (`proj_rest`),
+            // so `k(2)` arrives as `[Arr([2])]` and the resumption
+            // argument is that array's sole element.
+            let mut resume_args = arg_vals;
+            if unpack_arr
+                && resume_args.len() == 1
+                && let TaggedValue::Arr(arr) = &resume_args[0]
+            {
+                resume_args = arr.iter().cloned().collect();
+            }
+            let x = resume_args.into_iter().next().unwrap_or(TaggedValue::Null);
+            let node = match ctx.current_node().ok() {
+                Some(n) => n.clone(),
+                None => AstNode::new(""),
+            };
+            let mut cl = ClCtx { ctx: &mut *ctx };
+            return match resume_suspension(&mut cl, id, x, &node) {
+                Ok(v) => box_value(v),
+                Err(e) => ctx.set_error(e),
+            };
         }
         // Closure application — must be a TaggedValue::Arrow. ADR-0106:
         // the arrow is self-contained data (`body_def` + `binds` +
@@ -1753,10 +1958,11 @@ unsafe fn apply_value_treewalk(
         if !(arg_vals.len() == 1 && matches!(arg_vals[0], TaggedValue::Arr(_))) {
             arg_vals = vec![TaggedValue::Arr(Rc::from(arg_vals))];
         }
-    } else if unpack_arr && arg_vals.len() == 1 {
-        if let TaggedValue::Arr(arr) = &arg_vals[0] {
-            arg_vals = arr.iter().cloned().collect();
-        }
+    } else if unpack_arr
+        && arg_vals.len() == 1
+        && let TaggedValue::Arr(arr) = &arg_vals[0]
+    {
+        arg_vals = arr.iter().cloned().collect();
     }
     let mut engine = hnl_engine_exec_tree_walk::TreeWalkEngine::new();
     if let Some(m) = ctx.modules.clone() {
@@ -1775,11 +1981,23 @@ unsafe fn apply_value_treewalk(
         Ok(n) => n.clone(),
         Err(e) => return ctx.set_error(e),
     };
-    match engine.apply_app(
+    // Expose this evaluation to resumption drivers: a `resume` called by
+    // the arrow body (which runs in the tree-walk) re-enters this engine
+    // through the shared driver table. Derive the raw pointer once and
+    // use it for the post-call error path, so no `&mut EvalCtx` alias is
+    // live across the clause execution.
+    let ctx_ptr = ctx as *mut EvalCtx;
+    let prev_ctx = ACTIVE_EVAL_CTX.with(|c| c.replace(ctx_ptr));
+    let applied = engine.apply_app(
         &callee, &arg_vals, &scratch, lang, &mut env, call_ref, &call_node,
-    ) {
+    );
+    ACTIVE_EVAL_CTX.with(|c| c.set(prev_ctx));
+    match applied {
         Ok(v) => unsafe { box_value(v) },
-        Err(e) => ctx.set_error(e),
+        // SAFETY: `ctx_ptr` derives from the caller's `&mut EvalCtx`,
+        // which outlives this call; only that reference's tag is spent by
+        // the disjoint clause execution in between.
+        Err(e) => unsafe { (*ctx_ptr).set_error(e) },
     }
 }
 
@@ -1821,7 +2039,17 @@ fn prim_v2_flow(ctx: &mut EvalCtx, args: &[TaggedValue]) -> *mut TaggedValue {
         // ADR-0158: `perform` under a covering handler dispatches
         // in-flight before the `IO` mint.
         if native_ops::is_perform_callee(name) {
+            // Pass the ambient node so replay-mismatch diagnostics point
+            // at the `perform` call site.
+            let node = ctx.current_node().cloned().ok();
             let mut cl = ClCtx { ctx: &mut *ctx };
+            // Multi-shot resumption (ADR-0158 workstream): replay/suspend
+            // before the one-shot dispatch.
+            match journal_perform_or_suspend(&mut cl, &actual_args, node.as_ref()) {
+                Ok(Some(v)) => return unsafe { box_value(v) },
+                Ok(None) => {}
+                Err(e) => return ctx.set_error(e),
+            }
             match native_ops::perform_dispatch(&mut cl, &actual_args) {
                 Ok(Some(v)) => return unsafe { box_value(v) },
                 Ok(None) => {}
@@ -1944,6 +2172,12 @@ fn prim_v2_fold_step(
 ///
 /// Calls a foreign (host) function (identical behavior —
 /// foreign dispatch does not use the incoming value).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_call_foreign(
     ctx: *mut EvalCtx,
@@ -1957,6 +2191,12 @@ pub unsafe extern "C" fn helper_v2_call_foreign(
 /// Construct a pair value `{"__pair__": [a, b]}` from two value pointers.
 ///
 /// Both input pointers are consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_pair(
     _ctx: *mut EvalCtx,
@@ -1984,6 +2224,12 @@ pub unsafe extern "C" fn helper_v2_pair(
 /// dropping it via `helper_v2_drop_value` when done with both `fst` and
 /// `snd`). Returns a boxed clone of the first component. If the input is
 /// not a pair, sets an error.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_unpair_fst(
     ctx: *mut EvalCtx,
@@ -2010,6 +2256,12 @@ pub unsafe extern "C" fn helper_v2_unpair_fst(
 /// dropping it via `helper_v2_drop_value` when done with both `fst` and
 /// `snd`). Returns a boxed clone of the second component. If the input is
 /// not a pair, sets an error.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_unpair_snd(
     ctx: *mut EvalCtx,
@@ -2033,6 +2285,12 @@ pub unsafe extern "C" fn helper_v2_unpair_snd(
 /// Construct a `left` Either value `{"__either__": "left", "value": v}`.
 ///
 /// The input pointer is consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_either_left(
     _ctx: *mut EvalCtx,
@@ -2051,6 +2309,12 @@ pub unsafe extern "C" fn helper_v2_either_left(
 /// Construct a `right` Either value `{"__either__": "right", "value": v}`.
 ///
 /// The input pointer is consumed (reclaimed).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_either_right(
     _ctx: *mut EvalCtx,
@@ -2070,6 +2334,12 @@ pub unsafe extern "C" fn helper_v2_either_right(
 ///
 /// Returns 1 if the value is `{"__either__": "left", ...}`, 0 otherwise. The
 /// input pointer is NOT consumed (it is read-only).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_either_is_left(_ctx: *mut EvalCtx, val: *mut TaggedValue) -> u8 {
     unsafe {
@@ -2089,6 +2359,12 @@ pub unsafe extern "C" fn helper_v2_either_is_left(_ctx: *mut EvalCtx, val: *mut 
 ///
 /// The input pointer is consumed (reclaimed). Returns a boxed clone of the
 /// carried value. If the input is not an Either, sets an error.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_either_value(
     ctx: *mut EvalCtx,
@@ -2122,6 +2398,12 @@ pub unsafe extern "C" fn helper_v2_either_value(
 ///
 /// The `pair` pointer is NOT consumed (cloned). The returned pointer is
 /// a freshly boxed value.
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_derived_step_arg_incoming(
     ctx: *mut EvalCtx,
@@ -2179,6 +2461,12 @@ pub unsafe extern "C" fn helper_v2_derived_step_arg_incoming(
 /// matches the v2 tree-walk exactly: arithmetic, comparison, logic, `id`,
 /// `tag`, `closure`, and utility ops (`is_pos`/`dec`/`inc`/`half_floor`/
 /// `inc_fst`/`countdown_step`/`infinite_step`).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_apply_native(
     ctx: *mut EvalCtx,
@@ -2300,6 +2588,19 @@ fn apply_payload_op(
 /// dynamic extent; `handle` terms whose target is a *named* capability
 /// still eliminate statically via `Term::eliminate_handlers`.
 fn arr_dispatch(ctx: &mut EvalCtx, op: &str, incoming: &TaggedValue) -> *mut TaggedValue {
+    // Multi-shot resumption (ADR-0158 workstream): a journal-bound ≥2-ary
+    // clause covering `op` replays a journaled result or suspends to the
+    // owning `handle` driver before the ordinary apply — mirrors the
+    // tree-walk `dispatch_op` interception.
+    {
+        let node = ctx.current_node().cloned().ok();
+        let mut cl = ClCtx { ctx: &mut *ctx };
+        match journal_perform_or_suspend_op(&mut cl, op, incoming.clone(), node.as_ref()) {
+            Ok(Some(v)) => return unsafe { box_value(v) },
+            Ok(None) => {}
+            Err(e) => return ctx.set_error(e),
+        }
+    }
     let impl_val = ctx
         .handler_stack
         .iter()
@@ -2503,6 +2804,12 @@ pub unsafe extern "C" fn helper_v2_int_arith(
 ///
 /// The input pointer is NOT consumed (the caller uses it to extract the
 /// carried value / new state / fst after the tag is checked).
+/// # Safety
+///
+/// Every pointer argument must be a valid pointer supplied by the code
+/// this crate compiles (see the ABI notes on [`EvalCtx`]); value pointers
+/// must come from `box_value` and are consumed unless documented
+/// otherwise.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_loop_check(ctx: *mut EvalCtx, result: *mut TaggedValue) -> u8 {
     unsafe {
@@ -2785,10 +3092,423 @@ impl NativeOpCtx for ClCtx<'_> {
         handler: &TaggedValue,
         frame_handler: &TaggedValue,
     ) -> Result<TaggedValue, LangError> {
+        // Multi-shot resumption (ADR-0158 workstream — replay-journal
+        // model): a ≥2-ary clause `(payload, resume) ~> …` runs the body
+        // under a replay journal — covered `perform`s suspend to the
+        // driver and `resume` re-runs the body from this boundary.
+        // `acc` frames are excluded: their 2-ary impls are the
+        // `(payload, s) ~> (result, s')` convention, not resumptions.
+        if frame_handler.get(native_ops::HANDLER_ACC_KEY).is_none()
+            && native_ops::handler_has_resumption(frame_handler)
+        {
+            // The shell already pushed `frame_handler`; the journal driver
+            // pushes its own journal-stamped frame, so drop the shell's.
+            let _ = self.handler_pop();
+            let journal = Rc::new(ResumeJournal {
+                id: next_resume_id(),
+                target,
+                entry_env: self.ctx.env.clone(),
+                handler: frame_handler.clone(),
+                entries: RefCell::new(Vec::new()),
+                cursor: Cell::new(0),
+                suspended: Cell::new(None),
+            });
+            let node = self
+                .ctx
+                .current_node()
+                .cloned()
+                .unwrap_or_else(|_| AstNode::new(""));
+            let val = drive_journal(self, &journal, target, &node)?;
+            // Residual-`IO` post-pass + deep-handler carry — the same tail
+            // as `run_delimited_default` (the frame is pushed for the
+            // interpretation and dropped before attaching).
+            self.handler_push(frame_handler.clone());
+            let interpreted = native_ops::interpret_io_former(self, val);
+            let _ = self.handler_pop();
+            let val = interpreted?;
+            return Ok(native_ops::attach_carried_handler(val, frame_handler));
+        }
         // One-shot semantics (ADR-0158): shared body-eval + `IO`
         // interpretation + `return`/`acc` postlude + carried attach —
         // same delegation as `TwCtx::run_delimited`/`VmCtx::run_delimited`.
         native_ops::run_delimited_default(self, target, handler, frame_handler)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-shot resumption (`resume`) — dynamic extents + replay journals
+// ---------------------------------------------------------------------------
+//
+// Implements the multishot `resume` workstream (ADR-0158) on this engine:
+// every `handle … with h` whose clause is a journal-bound ≥2-ary arrow
+// `(payload, resume)` runs the body under a replay journal. `perform`
+// suspends on the first covered operation; `resume(x)` re-runs the body
+// from that boundary with the journal seeded by the recorded prefix
+// plus `(op, x)`. Values are re-executed (replay), not captured
+// continuation-wise. `resume` values are engine-namespaced
+// `{"__resume__": <id>}` objects minted by the owning engine's
+// suspension table (see [`RESUME_KEY`], [`JOURNAL_FRAME_KEY`]).
+
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
+/// Reserved object key marking a `resume` value (`{"__resume__": <id>}`),
+/// intercepted by this engine's application and dispatch seams — same
+/// convention as `__term__`/`__arr__`/`__former__` (multi-shot `resume`,
+/// ADR-0158 workstream — `design/multishot-resume.md`). The id indexes
+/// the minting engine's suspension table: a `resume` value is only
+/// callable under the engine that minted it.
+const RESUME_KEY: &str = "__resume__";
+
+/// A replay journal: everything `resume` needs to re-run one `handle`
+/// body (multi-shot resumption, delimited re-run model). All captured
+/// state is data — the body node + its `def_arenas` slot, the
+/// `handle`-entry scope snapshot, and the covering handler value.
+pub(crate) struct ResumeJournal {
+    /// Unique journal instance id — suspensions name the journal they
+    /// belong to so nested `handle`s catch only their own.
+    pub(crate) id: u64,
+    /// The `handle` body node — `handle_dyn`'s `target` child, an index
+    /// into the evaluation arena. Arrow bodies never reach this engine's
+    /// `handle_dyn` (arrow application runs in the tree-walk), so the
+    /// arena is always the global one.
+    pub(crate) target: AstRef,
+    /// Environment snapshot at `handle` entry — each run evals a clone,
+    /// so `assign` writes and scope pushes stay inside the run.
+    pub(crate) entry_env: ScopeStack,
+    /// The handler value (`{impls: {op: impl}}` or `{op: impl}` record).
+    pub(crate) handler: TaggedValue,
+    /// `(op, result)` entries in perform order: the replay log.
+    /// `resume(x)` at suspension index `i` seeds a fresh journal with
+    /// `entries[..i] ++ [(op, x)]`.
+    pub(crate) entries: RefCell<Vec<(Rc<str>, TaggedValue)>>,
+    /// Count of journal-intercepted `perform`s so far this run — the
+    /// replay cursor. Fresh runs start at 0 and consume `entries`.
+    pub(crate) cursor: Cell<usize>,
+    /// Set when this run suspends: further interceptions in the same run
+    /// re-raise that suspension instead of minting new ones. The compiled
+    /// backends evaluate sibling nodes eagerly (deferred-error channel),
+    /// so the body keeps running after the first suspension — but the
+    /// *first* suspension must remain the run's result, and the cursor
+    /// must not advance past it.
+    pub(crate) suspended: Cell<Option<u64>>,
+}
+
+/// A captured `perform` suspension awaiting `resume` — mirrors the
+/// tree-walk's `ResumeSuspension`.
+pub(crate) struct ResumeSuspension {
+    /// The journal active when the perform suspended.
+    pub(crate) journal: Rc<ResumeJournal>,
+    /// This perform's index in the journal's `entries` order.
+    pub(crate) index: usize,
+    /// The performed op name.
+    pub(crate) op: Rc<str>,
+    /// The perform's payload argument.
+    pub(crate) arg: TaggedValue,
+}
+
+/// Fresh resumption ids are namespaced to this engine (see
+/// [`RESUME_KEY`]): each engine derives its ids from a local atomic
+/// counter so a `resume` value minted by one engine is never callable
+/// under another engine. The range base is chosen far above any value
+/// an in-process eval could otherwise mint.
+fn next_resume_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    1_000_000_000 + id
+}
+
+/// Decode a `__resume__` payload to a suspension id — integral
+/// `Int`/`Float` payloads only (mirrors the tree-walk decoder).
+fn resume_id_of(v: &TaggedValue) -> Option<u64> {
+    match v {
+        TaggedValue::Int(i) if *i >= 0 => Some(*i as u64),
+        TaggedValue::Float(f) if *f >= 0.0 && f.fract() == 0.0 => Some(*f as u64),
+        _ => None,
+    }
+}
+
+/// Shared empty `AstNode` for error reports where the caller has no
+/// source node. `AstNode::new` is not `const`, so the fallback is built
+/// once and then shared by reference.
+fn empty_ast_node() -> &'static AstNode {
+    static EMPTY: std::sync::OnceLock<AstNode> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| AstNode::new(""))
+}
+
+thread_local! {
+    static RESUME_JOURNALS: RefCell<Vec<Rc<ResumeJournal>>> =
+        const { RefCell::new(Vec::new()) };
+    static RESUME_SUSPENSIONS: RefCell<HashMap<u64, Rc<ResumeSuspension>>> =
+        RefCell::new(HashMap::new());
+    /// The cranelift [`EvalCtx`] currently executing a clause application
+    /// through the tree-walk interpreter (`apply_value_treewalk`).
+    ///
+    /// Arrow values run in the tree-walk, so a `resume` called from inside
+    /// a clause body is applied there; the shared driver it reaches
+    /// (`native_ops::drive_shared_resumption`) recovers `&mut EvalCtx`
+    /// here. Save/restore keeps nested applications consistent, and a null
+    /// pointer means no cranelift evaluation is active.
+    static ACTIVE_EVAL_CTX: Cell<*mut EvalCtx> =
+        const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// The op-level half of the journal drive: resolve the innermost
+/// covering handler frame, and when its clause is a journal-bound
+/// ≥2-ary impl (`native_ops::impl_takes_resumption`), either replay the
+/// journaled result at the cursor (`Ok(Some(v))`) or suspend to the
+/// `drive` entry (`Err(LangError::Suspended)`). `Ok(None)` means the op
+/// has no journal-bound clause → fall through to one-shot dispatch.
+fn journal_perform_or_suspend_op(
+    ctx: &mut ClCtx,
+    op: &str,
+    arg: TaggedValue,
+    current_node: Option<&AstNode>,
+) -> Result<Option<TaggedValue>, LangError> {
+    // The innermost covering frame — same frame `handler_lookup`/
+    // `perform_dispatch` would resolve.
+    let covering = {
+        let stack = &ctx.ctx.handler_stack;
+        stack
+            .iter()
+            .rev()
+            .find(|h| native_ops::handler_impl(h, op).is_some())
+            .cloned()
+    };
+    let Some(frame) = covering else {
+        return Ok(None);
+    };
+    // `acc` frames use 2-ary impls for the `(payload, s)` convention —
+    // not resumptions. Non-arrow and 1-ary impls take the one-shot path.
+    if frame.get(native_ops::HANDLER_ACC_KEY).is_some() {
+        return Ok(None);
+    }
+    let Some(impl_val) = native_ops::handler_impl(&frame, op) else {
+        return Ok(None);
+    };
+    if !native_ops::impl_takes_resumption(&impl_val) {
+        return Ok(None);
+    }
+    // Journal-bound? A frame installed by a journal driver carries
+    // `__journal__`. Carried/foreign ≥2-ary impls fall through to the
+    // ordinary apply (arity error, as before).
+    let Some(TaggedValue::Int(jid)) = frame.get(native_ops::JOURNAL_FRAME_KEY) else {
+        return Ok(None);
+    };
+    let jid = *jid as u64;
+    let journal =
+        RESUME_JOURNALS.with(|js| js.borrow().iter().rev().find(|j| j.id == jid).cloned());
+    let Some(journal) = journal else {
+        return Ok(None);
+    };
+    // A run that already suspended keeps evaluating sibling nodes (the
+    // compiled backends use a deferred-error channel), so re-raise the
+    // first suspension instead of minting another at a later cursor.
+    if let Some(sid) = journal.suspended.get() {
+        return Err(LangError::Suspended { id: sid });
+    }
+    // Replay-or-suspend at this journal's cursor.
+    let i = journal.cursor.get();
+    journal.cursor.set(i + 1);
+    if let Some((logged_op, val)) = journal.entries.borrow().get(i).cloned() {
+        if logged_op.as_ref() != op {
+            let node: &AstNode = match current_node {
+                Some(n) => n,
+                None => empty_ast_node(),
+            };
+            return Err(LangError::engine_node(
+                format!(
+                    "resume: replay op mismatch at index {i} — journaled '{logged_op}', re-ran '{op}' (nondeterministic perform sequence: replay requires deterministic bodies)"
+                ),
+                node,
+            ));
+        }
+        return Ok(Some(val));
+    }
+    let id = next_resume_id();
+    journal.suspended.set(Some(id));
+    RESUME_SUSPENSIONS.with(|t| {
+        t.borrow_mut().insert(
+            id,
+            Rc::new(ResumeSuspension {
+                journal: Rc::clone(&journal),
+                index: i,
+                op: Rc::from(op),
+                arg: arg.clone(),
+            }),
+        );
+    });
+    // Bridge for clause bodies: cranelift applies arrows through the
+    // tree-walk interpreter, so a `resume` for this suspension may be
+    // applied by a different engine — register an engine-neutral driver
+    // in the shared table as well (see
+    // `native_ops::register_resumption_driver`).
+    {
+        let journal = Rc::clone(&journal);
+        let op = Rc::from(op);
+        native_ops::register_resumption_driver(
+            id,
+            Rc::new(move |x: TaggedValue| {
+                let ptr = ACTIVE_EVAL_CTX.with(|c| c.get());
+                if ptr.is_null() {
+                    return Err(LangError::engine(
+                        "resume: no active cranelift evaluation for this resumption".to_string(),
+                    ));
+                }
+                // SAFETY: `apply_value_treewalk` installs the pointer for
+                // the duration of a clause application and restores it on
+                // exit; the engine is not otherwise borrowed during it.
+                let eval = unsafe { &mut *ptr };
+                let mut cl = ClCtx { ctx: eval };
+                resume_from(&mut cl, &journal, i, &op, x, empty_ast_node())
+            }),
+        );
+    }
+    Err(LangError::Suspended { id })
+}
+
+/// The `perform` interception (multi-shot): `args` are the
+/// `PerformFn` argument vector `[op, payload?]`. When the op's covering
+/// handler frame is journal-bound and its clause is ≥2-ary, either
+/// replay the journaled result at the cursor (`Ok(Some(v))`) or suspend
+/// (`Err(LangError::Suspended)`). `Ok(None)` → fall through to
+/// `native_ops::perform_dispatch` (one-shot) or the residual mint.
+fn journal_perform_or_suspend(
+    ctx: &mut ClCtx,
+    args: &[TaggedValue],
+    current_node: Option<&AstNode>,
+) -> Result<Option<TaggedValue>, LangError> {
+    let op: Rc<str> = match args.first() {
+        Some(TaggedValue::Str(s)) => Rc::clone(s) as Rc<str>,
+        Some(TaggedValue::Sym(s)) => Rc::from(s.name()),
+        Some(TaggedValue::Obj(f)) => match f.get("sym") {
+            Some(TaggedValue::Sym(s)) => Rc::from(s.name()),
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let arg = args.get(1).cloned().unwrap_or(TaggedValue::Null);
+    journal_perform_or_suspend_op(ctx, op.as_ref(), arg, current_node)
+}
+
+/// `resume(x)` — re-run the suspended `handle` body under a fresh
+/// journal seeded with `entries[..index] ++ [(op, x)]`. The body's
+/// completed value (through the `return` clause) is `resume`'s result;
+/// a suspension inside the re-run invokes the covering clause again,
+/// whose result is this call's result — copyable, multi-shot
+/// delimited continuation via replay.
+fn resume_suspension(
+    ctx: &mut ClCtx,
+    id: u64,
+    x: TaggedValue,
+    current_node: &AstNode,
+) -> Result<TaggedValue, LangError> {
+    let susp = RESUME_SUSPENSIONS
+        .with(|t| t.borrow().get(&id).cloned())
+        .ok_or_else(|| {
+            LangError::engine_node(
+                format!("resume: unknown resumption {id} — suspension not in the table"),
+                current_node,
+            )
+        })?;
+    resume_from(ctx, &susp.journal, susp.index, &susp.op, x, current_node)
+}
+
+/// Re-run `journal`'s body with the replay prefix
+/// `entries[..index] ++ [(op, x)]` — the shared core of `resume`, used
+/// both by the engine-local apply seam ([`resume_suspension`]) and by the
+/// shared driver a tree-walk-applied clause reaches
+/// ([`journal_perform_or_suspend_op`]).
+fn resume_from(
+    ctx: &mut ClCtx,
+    j: &Rc<ResumeJournal>,
+    index: usize,
+    op: &Rc<str>,
+    x: TaggedValue,
+    current_node: &AstNode,
+) -> Result<TaggedValue, LangError> {
+    let prefix_len = index.min(j.entries.borrow().len());
+    let mut entries: Vec<(Rc<str>, TaggedValue)> = j.entries.borrow()[..prefix_len].to_vec();
+    entries.push((Rc::clone(op), x));
+    let j2 = Rc::new(ResumeJournal {
+        id: next_resume_id(),
+        target: j.target,
+        entry_env: j.entry_env.clone(),
+        handler: j.handler.clone(),
+        entries: RefCell::new(entries),
+        cursor: Cell::new(0),
+        suspended: Cell::new(None),
+    });
+    drive_journal(ctx, &j2, j.target, current_node)
+}
+
+/// Drive a journaled `handle` body to completion (ADR-0158).
+/// The `handle` shell has already pushed the journal frame; this
+/// restores the entry env, evaluates `target` under it, applies the
+/// `return` clause on success, or re-applies the suspended clause with
+/// the resumed value on a `Suspended`.
+fn drive_journal(
+    ctx: &mut ClCtx,
+    journal: &Rc<ResumeJournal>,
+    target: AstRef,
+    current_node: &AstNode,
+) -> Result<TaggedValue, LangError> {
+    // Register the journal for the run's extent — the `perform`
+    // interception (`journal_perform_or_suspend_op`) resolves the
+    // ownership frame's `__journal__` stamp against this thread-local
+    // stack.
+    RESUME_JOURNALS.with(|js| js.borrow_mut().push(Rc::clone(journal)));
+    ctx.ctx.handler_stack.push(native_ops::journal_frame_value(
+        &journal.handler,
+        journal.id,
+    ));
+    // Each run evals a *clone* of the handle-entry env — scope pushes
+    // and `assign` writes stay inside the run.
+    let saved_scopes = std::mem::replace(&mut ctx.ctx.env, journal.entry_env.clone());
+    let result = ctx.eval_node(target);
+    ctx.ctx.env = saved_scopes;
+    ctx.ctx.handler_stack.pop();
+    RESUME_JOURNALS.with(|js| {
+        let mut js = js.borrow_mut();
+        if let Some(pos) = js.iter().rposition(|j| Rc::ptr_eq(j, journal)) {
+            js.remove(pos);
+        }
+    });
+    match result {
+        Ok(val) => {
+            // `return` clause — the algebra's unit map on the pure
+            // result (ADR-0158). Applied at every driver completion.
+            if let Some(ret) = native_ops::handler_impl(&journal.handler, "return") {
+                let ptr = apply_closure_value_opts(ctx.ctx, ret.clone(), vec![val], false);
+                // SAFETY: `ptr` produced by `box_value`, reclaimed exactly once.
+                return Ok(unsafe { take_value(ptr) });
+            }
+            Ok(val)
+        }
+        Err(e) => {
+            if let Some(id) = e.suspension_id() {
+                let susp = RESUME_SUSPENSIONS.with(|t| t.borrow().get(&id).cloned());
+                if let Some(susp) = susp.filter(|s| s.journal.id == journal.id) {
+                    let impl_val = native_ops::handler_impl(&journal.handler, &susp.op)
+                        .ok_or_else(|| {
+                            LangError::engine_node(
+                                format!("resume: no impl for suspended op '{}'", susp.op),
+                                current_node,
+                            )
+                        })?;
+                    // The clause gets `(payload, resume)`; its result is
+                    // the `handle` result (deep-handler reading).
+                    let k = native_ops::mint_resume_value(id);
+                    let ptr = apply_closure_value_opts(
+                        ctx.ctx,
+                        impl_val.clone(),
+                        vec![susp.arg.clone(), k],
+                        false,
+                    );
+                    return Ok(unsafe { take_value(ptr) });
+                }
+            }
+            Err(e)
+        }
     }
 }
 
@@ -2880,7 +3600,17 @@ fn apply_native_v2(
                     Some(TaggedValue::Arr(arr)) => arr.to_vec(),
                     _ => Vec::new(),
                 };
+                // Pass the ambient node so replay-mismatch diagnostics
+                // point at the `perform` call site.
+                let node = ctx.current_node().cloned().ok();
                 let mut cl = ClCtx { ctx: &mut *ctx };
+                // Multi-shot resumption (ADR-0158 workstream): replay/suspend
+                // before the one-shot dispatch.
+                match journal_perform_or_suspend(&mut cl, &arg_tvs, node.as_ref()) {
+                    Ok(Some(v)) => return unsafe { box_value(v) },
+                    Ok(None) => {}
+                    Err(e) => return ctx.set_error(e),
+                }
                 match native_ops::perform_dispatch(&mut cl, &arg_tvs) {
                     Ok(Some(v)) => return unsafe { box_value(v) },
                     Ok(None) => {}
@@ -2905,10 +3635,9 @@ fn apply_native_v2(
                 }
             };
             let call_args: Vec<Value> = match arg_src {
-                Some(TaggedValue::Arr(arr)) => arr
-                    .iter()
-                    .map(|v| handl_value::tagged_to_value(v))
-                    .collect(),
+                Some(TaggedValue::Arr(arr)) => {
+                    arr.iter().map(handl_value::tagged_to_value).collect()
+                }
                 _ => Vec::new(),
             };
             let mut pctx = handl_platform::EvalContext::new();
@@ -2937,9 +3666,9 @@ mod tests {
     use super::*;
     use handl_language::{AstNode, EvalSchemeDef, Term};
     use handl_platform::{EvalContext, Function, Module, ModuleLookup};
-    use hnl_engine_exec::EvalRequest;
     use handl_plugin_module::ModuleRegistry;
     use hnl_engine::{ArrSource, TermData};
+    use hnl_engine_exec::EvalRequest;
     use serde_json::json;
 
     /// Build a simple AST for testing.
@@ -5275,5 +6004,339 @@ mod tests {
         let req = EvalRequest::new(ast);
         let err = engine.eval(&lang, &req).unwrap_err();
         assert!(err.to_string().contains("no import resolver configured"));
+    }
+
+    // -----------------------------------------------------------------
+    // Multi-shot `resume` (ADR-0158 workstream — replay journals)
+    // -----------------------------------------------------------------
+
+    /// `proj_env name` — variable lookup (the v2 `var` spelling).
+    fn rvar(name: &str) -> TermData {
+        op_lit("proj_env", vec![], name)
+    }
+
+    /// `proj_child n` — child-node projection.
+    fn rchild(n: u64) -> TermData {
+        op_lit("proj_child", vec![], Value::from(n))
+    }
+
+    /// `arr_native op args` — a native op with no literal operand.
+    fn rprim(op: &str, args: Vec<TermData>) -> TermData {
+        op_native(op, args)
+    }
+
+    /// Minimal language for resumption tests: `var`, `value` (payload
+    /// fallback), `binary.add`, `array`, `idx` (`prim index` — element
+    /// projection), `call` (canonical callee routing — string callees go
+    /// to `call_host`, values to `App`), `function` (closure op),
+    /// `object`/`entry` (handler records), `handle` (`!Handle` term — the
+    /// dynamic-extent arm, not the `match`-style `handle` op).
+    fn resume_lang() -> Language {
+        let mut lang = Language::new();
+        lang.eval
+            .merge(EvalSchemeDef::new("e.var", "var", td(rvar("$payload"))))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.add",
+                "binary.add",
+                td(rprim("add", vec![rchild(0), rchild(1)])),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.array",
+                "array",
+                td(rprim("array", vec![])),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.index",
+                "idx",
+                td(rprim("index", vec![rchild(0), rchild(1)])),
+            ))
+            .unwrap();
+        // eval.call's canonical shape: route the evaluated callee by
+        // type — string → `call_host` (host fn, incl. `perform`), value
+        // → `App` (arrows, `resume` objects).
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.call",
+                "call",
+                td(seq(
+                    seq(rchild(0), op_lit("route_on_type", vec![], "string")),
+                    choice(
+                        rprim("call_host", vec![rprim("proj_rest", vec![])]),
+                        app(rprim("id", vec![]), vec![rprim("proj_rest", vec![])]),
+                    ),
+                )),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.function",
+                "function",
+                td(rprim("closure", vec![])),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.object",
+                "object",
+                td(rprim("object", vec![])),
+            ))
+            .unwrap();
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.handle",
+                "handle",
+                td(TermData::handle(rchild(0), "", rchild(1))),
+            ))
+            .unwrap();
+        // `let <value> in <body>` — bind the value under the node
+        // payload's `name` (`extend_env "$payload"`), then run the body.
+        lang.eval
+            .merge(EvalSchemeDef::new(
+                "e.let",
+                "let",
+                td(seq(
+                    seq(rchild(0), op_lit("extend_env", vec![], "$payload")),
+                    rchild(1),
+                )),
+            ))
+            .unwrap();
+        lang
+    }
+
+    /// `choose`: `handle (perform(choose, [1,2]) + 100) with
+    /// {choose: (opts, resume) ~> [resume(opts[0]), resume(opts[1])]}`
+    /// → `[101, 102]` — each `resume` call re-runs the body, feeding the
+    /// option back at the `perform` site and continuing through `+100`.
+    #[test]
+    fn choose_multishot_resume_collects_both_continuations() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0: callee
+            AstNode::new("var").with_payload(json!("choose")),  // 1: op arg
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform(choose,[1,2])
+            AstNode::new("value").with_payload(json!(100)),                    // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7: BODY
+            AstNode::new("var").with_payload(json!("resume")),                 // 8
+            AstNode::new("var").with_payload(json!("opts")),                   // 9
+            AstNode::new("value").with_payload(json!(0)),                      // 10
+            AstNode::new("idx").with_payload(json!({"children": [9, 10]})),    // 11: opts[0]
+            AstNode::new("call").with_payload(json!({"children": [8, 11]})), // 12: resume(opts[0])
+            AstNode::new("value").with_payload(json!(1)),                    // 13
+            AstNode::new("idx").with_payload(json!({"children": [9, 13]})),  // 14: opts[1]
+            AstNode::new("call").with_payload(json!({"children": [8, 14]})), // 15: resume(opts[1])
+            AstNode::new("array").with_payload(json!({"children": [12, 15]})), // 16: clause body
+            AstNode::new("function")
+                .with_payload(json!({"params": ["opts", "resume"], "body": 16})), // 17
+            AstNode::new("key").with_payload(json!("choose")),               // 18: entry key
+            AstNode::new("entry").with_payload(json!({"children": [18, 17]})), // 19
+            AstNode::new("object").with_payload(json!({"children": [19]})),  // 20: handler
+            AstNode::new("handle").with_payload(json!({"children": [7, 20]})), // 21: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!([101, 102]));
+    }
+
+    /// Nested multi-shot: two `choose`s in one body.
+    /// `handle (perform(choose,[1,2]) + perform(choose,[10,20])) with
+    /// {choose: (opts, resume) ~> [resume(opts[0]), resume(opts[1])]}`
+    /// → `[[11, 21], [12, 22]]` — the second perform suspends inside each
+    /// first-level resume, the clause re-runs per nested suspension.
+    #[test]
+    fn choose_nested_suspensions_are_cartesian() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("choose")),  // 1
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform(choose,[1,2])
+            AstNode::new("value").with_payload(json!(10)),                     // 6
+            AstNode::new("value").with_payload(json!(20)),                     // 7
+            AstNode::new("array").with_payload(json!({"children": [6, 7]})),   // 8: [10,20]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 8]})), // 9: perform(choose,[10,20])
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 9]})), // 10: BODY
+            AstNode::new("var").with_payload(json!("resume")),                 // 11
+            AstNode::new("var").with_payload(json!("opts")),                   // 12
+            AstNode::new("value").with_payload(json!(0)),                      // 13
+            AstNode::new("idx").with_payload(json!({"children": [12, 13]})),   // 14: opts[0]
+            AstNode::new("call").with_payload(json!({"children": [11, 14]})), // 15: resume(opts[0])
+            AstNode::new("value").with_payload(json!(1)),                     // 16
+            AstNode::new("idx").with_payload(json!({"children": [12, 16]})),  // 17: opts[1]
+            AstNode::new("call").with_payload(json!({"children": [11, 17]})), // 18: resume(opts[1])
+            AstNode::new("array").with_payload(json!({"children": [15, 18]})), // 19: clause
+            AstNode::new("function")
+                .with_payload(json!({"params": ["opts", "resume"], "body": 19})), // 20
+            AstNode::new("key").with_payload(json!("choose")),                // 21
+            AstNode::new("entry").with_payload(json!({"children": [21, 20]})), // 22
+            AstNode::new("object").with_payload(json!({"children": [22]})),   // 23
+            AstNode::new("handle").with_payload(json!({"children": [10, 23]})), // 24: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(
+            engine.eval(&lang, &req).unwrap(),
+            json!([[11, 21], [12, 22]])
+        );
+    }
+
+    /// One-shot regression: a 1-ary clause stays on the direct dispatch
+    /// path — `handle perform(puts, "hi") with {puts: s ~> s}` returns
+    /// the impl's result at the perform site (in-flight dispatch,
+    /// ADR-0158). No journal is installed.
+    #[test]
+    fn perform_one_shot_clause_dispatch_unchanged() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("puts")),    // 1
+            AstNode::new("value").with_payload(json!("hi")),    // 2
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 2]})), // 3: perform(puts,"hi")
+            AstNode::new("var").with_payload(json!("s")),                      // 4: clause body
+            AstNode::new("function").with_payload(json!({"params": ["s"], "body": 4})), // 5: 1-ary impl
+            AstNode::new("key").with_payload(json!("puts")),                            // 6
+            AstNode::new("entry").with_payload(json!({"children": [6, 5]})),            // 7
+            AstNode::new("object").with_payload(json!({"children": [7]})),              // 8
+            AstNode::new("handle").with_payload(json!({"children": [3, 8]})),           // 9: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!("hi"));
+    }
+
+    /// Escape semantics (ADR-0158): the clause may return the resumption
+    /// value itself, and the caller applies it — a `resume` is a
+    /// first-class, copyable value, not a one-shot callback. `k(2)` re-runs
+    /// the handled body under `entries = [(choose, 2)]` → `2 + 100`.
+    #[test]
+    fn resume_escapes_the_handle_and_still_runs() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("choose")),  // 1
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4: [1,2]
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5: perform
+            AstNode::new("value").with_payload(json!(100)),     // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7: BODY
+            AstNode::new("var").with_payload(json!("opts")),    // 8
+            AstNode::new("var").with_payload(json!("resume")),  // 9: clause returns `resume`
+            AstNode::new("function").with_payload(json!({"params": ["opts", "resume"], "body": 9})), // 10
+            AstNode::new("key").with_payload(json!("choose")), // 11
+            AstNode::new("entry").with_payload(json!({"children": [11, 10]})), // 12
+            AstNode::new("object").with_payload(json!({"children": [12]})), // 13
+            AstNode::new("handle").with_payload(json!({"children": [7, 13]})), // 14: escaped `k`
+            AstNode::new("var").with_payload(json!("k")),      // 15: body — the binding
+            AstNode::new("value").with_payload(json!(2)),      // 16: k(2)
+            AstNode::new("call").with_payload(json!({"children": [15, 16]})), // 17
+            AstNode::new("let").with_payload(json!({"name": "k", "children": [14, 17]})), // 18: root
+        ]);
+        let req = EvalRequest::new(ast);
+        assert_eq!(engine.eval(&lang, &req).unwrap(), json!(102));
+    }
+
+    /// Table lifecycle: the outermost eval clears the replay bookkeeping
+    /// (engine journals/suspensions + the shared cross-engine driver
+    /// table) on exit, so a long-lived thread does not accumulate one
+    /// suspension per multishot `handle` it ever ran.
+    #[test]
+    fn resume_tables_are_cleared_at_eval_exit() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("choose")),  // 1
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5
+            AstNode::new("value").with_payload(json!(100)),     // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7
+            AstNode::new("var").with_payload(json!("opts")),    // 8
+            AstNode::new("var").with_payload(json!("resume")),  // 9
+            AstNode::new("function").with_payload(json!({"params": ["opts", "resume"], "body": 9})), // 10
+            AstNode::new("key").with_payload(json!("choose")), // 11
+            AstNode::new("entry").with_payload(json!({"children": [11, 10]})), // 12
+            AstNode::new("object").with_payload(json!({"children": [12]})), // 13
+            AstNode::new("handle").with_payload(json!({"children": [7, 13]})), // 14
+        ]);
+        let req = EvalRequest::new(ast);
+        // The clause returns `resume`, so the handle result is the
+        // suspension value — the tables must be populated during the eval.
+        let out = engine.eval(&lang, &req).unwrap();
+        assert!(out["__resume__"].as_i64().is_some(), "{out}");
+        // ... and reclaimed when the eval returns.
+        assert_eq!(RESUME_JOURNALS.with(|j| j.borrow().len()), 0, "journals");
+        assert_eq!(
+            RESUME_SUSPENSIONS.with(|s| s.borrow().len()),
+            0,
+            "suspensions"
+        );
+        assert!(
+            ACTIVE_EVAL_CTX.with(|c| c.get()).is_null(),
+            "active eval ctx"
+        );
+        assert_eq!(native_ops::resumption_driver_count(), 0, "shared drivers");
+    }
+
+    /// Cross-eval escape is a documented limit: `resume` is callable while
+    /// the eval that minted it is live (see
+    /// `resume_escapes_the_handle_and_still_runs`), but the tables are
+    /// finalized at the eval boundary, so applying the value in a *later*
+    /// eval no longer resolves — it errors instead of silently re-running
+    /// against a stale journal.
+    #[test]
+    fn resume_does_not_survive_across_evals() {
+        let engine = CraneliftEngine::new();
+        let lang = resume_lang();
+        // Eval 1: the clause returns `resume`, so the handle result is the
+        // suspension value.
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("perform")), // 0
+            AstNode::new("var").with_payload(json!("choose")),  // 1
+            AstNode::new("value").with_payload(json!(1)),       // 2
+            AstNode::new("value").with_payload(json!(2)),       // 3
+            AstNode::new("array").with_payload(json!({"children": [2, 3]})), // 4
+            AstNode::new("call").with_payload(json!({"children": [0, 1, 4]})), // 5
+            AstNode::new("value").with_payload(json!(100)),     // 6
+            AstNode::new("binary.add").with_payload(json!({"children": [5, 6]})), // 7
+            AstNode::new("var").with_payload(json!("opts")),    // 8
+            AstNode::new("var").with_payload(json!("resume")),  // 9
+            AstNode::new("function").with_payload(json!({"params": ["opts", "resume"], "body": 9})), // 10
+            AstNode::new("key").with_payload(json!("choose")), // 11
+            AstNode::new("entry").with_payload(json!({"children": [11, 10]})), // 12
+            AstNode::new("object").with_payload(json!({"children": [12]})), // 13
+            AstNode::new("handle").with_payload(json!({"children": [7, 13]})), // 14
+        ]);
+        let escaped = engine.eval(&lang, &EvalRequest::new(ast)).unwrap();
+        assert!(escaped["__resume__"].as_i64().is_some(), "{escaped}");
+
+        // Eval 2: apply the escaped value — the suspension table was
+        // reclaimed when eval 1 finished.
+        let ast = make_ast(vec![
+            AstNode::new("var").with_payload(json!("k")), // 0
+            AstNode::new("value").with_payload(json!(2)), // 1
+            AstNode::new("call").with_payload(json!({"children": [0, 1]})), // 2
+        ]);
+        let engine = engine.with_global("k", escaped);
+        let err = engine
+            .eval(&lang, &EvalRequest::new(ast))
+            .expect_err("escaped resumption must not resolve in a later eval");
+        assert!(
+            err.to_string().contains("unknown resumption"),
+            "unexpected error: {err}"
+        );
     }
 }

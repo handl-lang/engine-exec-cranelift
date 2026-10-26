@@ -73,8 +73,8 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use handl_language::Value as JsonValue;
 use handl_language::{ArrSource, Ast, LangError, Language, SchemeVersion, Term};
-use hnl_engine_exec::native_ops;
 use hnl_engine::TermData;
+use hnl_engine_exec::native_ops;
 
 /// Type alias for a compiled native function pointer.
 ///
@@ -84,6 +84,7 @@ use hnl_engine::TermData;
 /// pointers. Arrows flow an `incoming` value through the computation.
 pub type CompiledFn = unsafe extern "C" fn(*mut u8, *mut u8) -> *mut u8;
 
+#[allow(clippy::large_enum_variant)]
 /// The backend holding compiled code alive.
 ///
 /// For JIT mode, the [`JITModule`] must be kept alive so the compiled code
@@ -220,6 +221,7 @@ struct HelperIds {
     loop_check: FuncId,
     derived_step_arg_incoming: FuncId,
     clone: FuncId,
+    error_is_suspended: FuncId,
 }
 
 /// `FuncRef`s for the helpers, declared in a specific function.
@@ -255,6 +257,7 @@ struct HelperRefs {
     loop_check: FuncRef,
     derived_step_arg_incoming: FuncRef,
     clone: FuncRef,
+    error_is_suspended: FuncRef,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +346,10 @@ pub fn compile_all_nodes_jit(
     builder.symbol(
         "helper_v2_drop_value",
         crate::helper_v2_drop_value as *const u8,
+    );
+    builder.symbol(
+        "helper_v2_error_is_suspended",
+        crate::helper_v2_error_is_suspended as *const u8,
     );
     builder.symbol(
         "helper_v2_apply_closure",
@@ -456,8 +463,8 @@ pub fn compile_all_nodes_object(
     )?;
 
     let function_names: HashMap<usize, String> = func_ids
-        .iter()
-        .map(|(i, _)| (*i, format!("node_{}", i)))
+        .keys()
+        .map(|i| (*i, format!("node_{}", i)))
         .collect();
 
     let product = module.finish();
@@ -584,6 +591,13 @@ fn declare_helper_imports_v2<M: Module>(
     let mut sig_1arg_void = module.make_signature();
     sig_1arg_void.params.push(AbiParam::new(ptr_type));
 
+    // (ctx) -> i64  (error_is_suspended)
+    let mut sig_error_is_suspended = module.make_signature();
+    sig_error_is_suspended.params.push(AbiParam::new(ptr_type));
+    sig_error_is_suspended
+        .returns
+        .push(AbiParam::new(types::I64));
+
     // (ctx, name_idx, val) -> ptr  (extend_env)
     let mut sig_extend_env = module.make_signature();
     sig_extend_env.params.push(AbiParam::new(ptr_type));
@@ -678,6 +692,11 @@ fn declare_helper_imports_v2<M: Module>(
         extend_env_payload: declare(module, "helper_v2_extend_env_payload", &sig_2arg_ret)?,
         pop_scope: declare(module, "helper_v2_pop_scope", &sig_1arg_void)?,
         drop_value: declare(module, "helper_v2_drop_value", &sig_drop)?,
+        error_is_suspended: declare(
+            module,
+            "helper_v2_error_is_suspended",
+            &sig_error_is_suspended,
+        )?,
         apply_closure: declare(module, "helper_v2_apply_closure", &sig_apply_closure)?,
         call_foreign: declare(module, "helper_v2_call_foreign", &sig_apply_closure)?,
         call_ffi_raw: declare(module, "helper_v2_call_ffi_raw", &sig_apply_closure)?,
@@ -704,6 +723,7 @@ fn declare_helper_imports_v2<M: Module>(
 // Per-node compilation
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 /// Compile a single node's scheme into a native function.
 ///
 /// Compiles a node's [`Term`] to IR. The function signature is
@@ -732,34 +752,35 @@ fn compile_node<M: Module>(
         let mut builder = FunctionBuilder::new(&mut ctx.func, func_ctx);
 
         let helpers = HelperRefs {
-            push_literal: module.declare_func_in_func(helper_ids.push_literal, &mut builder.func),
-            load_var: module.declare_func_in_func(helper_ids.load_var, &mut builder.func),
+            push_literal: module.declare_func_in_func(helper_ids.push_literal, builder.func),
+            load_var: module.declare_func_in_func(helper_ids.load_var, builder.func),
             load_payload_var: module
-                .declare_func_in_func(helper_ids.load_payload_var, &mut builder.func),
-            load_payload: module.declare_func_in_func(helper_ids.load_payload, &mut builder.func),
-            eval_child: module.declare_func_in_func(helper_ids.eval_child, &mut builder.func),
-            extend_env: module.declare_func_in_func(helper_ids.extend_env, &mut builder.func),
+                .declare_func_in_func(helper_ids.load_payload_var, builder.func),
+            load_payload: module.declare_func_in_func(helper_ids.load_payload, builder.func),
+            eval_child: module.declare_func_in_func(helper_ids.eval_child, builder.func),
+            extend_env: module.declare_func_in_func(helper_ids.extend_env, builder.func),
             extend_env_payload: module
-                .declare_func_in_func(helper_ids.extend_env_payload, &mut builder.func),
-            pop_scope: module.declare_func_in_func(helper_ids.pop_scope, &mut builder.func),
-            drop_value: module.declare_func_in_func(helper_ids.drop_value, &mut builder.func),
-            apply_closure: module.declare_func_in_func(helper_ids.apply_closure, &mut builder.func),
-            call_foreign: module.declare_func_in_func(helper_ids.call_foreign, &mut builder.func),
-            call_ffi_raw: module.declare_func_in_func(helper_ids.call_ffi_raw, &mut builder.func),
-            pair: module.declare_func_in_func(helper_ids.pair, &mut builder.func),
-            unpair_fst: module.declare_func_in_func(helper_ids.unpair_fst, &mut builder.func),
-            unpair_snd: module.declare_func_in_func(helper_ids.unpair_snd, &mut builder.func),
-            either_left: module.declare_func_in_func(helper_ids.either_left, &mut builder.func),
-            either_right: module.declare_func_in_func(helper_ids.either_right, &mut builder.func),
-            either_is_left: module
-                .declare_func_in_func(helper_ids.either_is_left, &mut builder.func),
-            either_value: module.declare_func_in_func(helper_ids.either_value, &mut builder.func),
-            apply_native: module.declare_func_in_func(helper_ids.apply_native, &mut builder.func),
-            int_arith: module.declare_func_in_func(helper_ids.int_arith, &mut builder.func),
-            loop_check: module.declare_func_in_func(helper_ids.loop_check, &mut builder.func),
+                .declare_func_in_func(helper_ids.extend_env_payload, builder.func),
+            pop_scope: module.declare_func_in_func(helper_ids.pop_scope, builder.func),
+            drop_value: module.declare_func_in_func(helper_ids.drop_value, builder.func),
+            error_is_suspended: module
+                .declare_func_in_func(helper_ids.error_is_suspended, builder.func),
+            apply_closure: module.declare_func_in_func(helper_ids.apply_closure, builder.func),
+            call_foreign: module.declare_func_in_func(helper_ids.call_foreign, builder.func),
+            call_ffi_raw: module.declare_func_in_func(helper_ids.call_ffi_raw, builder.func),
+            pair: module.declare_func_in_func(helper_ids.pair, builder.func),
+            unpair_fst: module.declare_func_in_func(helper_ids.unpair_fst, builder.func),
+            unpair_snd: module.declare_func_in_func(helper_ids.unpair_snd, builder.func),
+            either_left: module.declare_func_in_func(helper_ids.either_left, builder.func),
+            either_right: module.declare_func_in_func(helper_ids.either_right, builder.func),
+            either_is_left: module.declare_func_in_func(helper_ids.either_is_left, builder.func),
+            either_value: module.declare_func_in_func(helper_ids.either_value, builder.func),
+            apply_native: module.declare_func_in_func(helper_ids.apply_native, builder.func),
+            int_arith: module.declare_func_in_func(helper_ids.int_arith, builder.func),
+            loop_check: module.declare_func_in_func(helper_ids.loop_check, builder.func),
             derived_step_arg_incoming: module
-                .declare_func_in_func(helper_ids.derived_step_arg_incoming, &mut builder.func),
-            clone: module.declare_func_in_func(helper_ids.clone, &mut builder.func),
+                .declare_func_in_func(helper_ids.derived_step_arg_incoming, builder.func),
+            clone: module.declare_func_in_func(helper_ids.clone, builder.func),
         };
 
         // Entry block: two params (ctx, incoming).
@@ -809,6 +830,7 @@ fn compile_node<M: Module>(
 // Term compilation (recursive)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 /// Compile a [`Term`] into cranelift IR, returning the result `Value` and
 /// whether a scope was pushed that the caller is responsible for popping.
 ///
@@ -842,6 +864,7 @@ fn compile_scheme(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 /// The [`TermData`]-driven counterpart of [`compile_scheme`].
 ///
 /// Dispatches on [`TermData::tag`] and reads variant fields via the
@@ -922,22 +945,41 @@ fn compile_scheme_td(
                         ptr_type,
                         ffi_ops,
                     )?;
+                    // A multi-shot `Suspended` is control flow (ADR-0158):
+                    // do not run the second half of the sequence — the
+                    // journal driver resumes from the suspending op.
+                    let susp = builder
+                        .ins()
+                        .call(helpers.error_is_suspended, &[ctx_param]);
+                    let is_susp = builder.inst_results(susp)[0];
+                    let bail_block = builder.create_block();
+                    let snd_block = builder.create_block();
+                    builder.ins().brif(is_susp, bail_block, &[], snd_block, &[]);
+                    builder.switch_to_block(bail_block);
+                    builder.seal_block(bail_block);
+                    if fst_pushed {
+                        builder.ins().call(helpers.pop_scope, &[ctx_param]);
+                    }
+                    let bail_null = builder.ins().iconst(ptr_type, 0);
+                    builder.ins().return_(&[bail_null]);
+                    builder.switch_to_block(snd_block);
+                    builder.seal_block(snd_block);
                     let (snd_val, snd_pushed) = compile_scheme_td(
                         builder, &snd, ctx_param, fst_val, helpers, pools, ptr_type, ffi_ops,
                     )?;
                     if fst_pushed {
                         builder.ins().call(helpers.pop_scope, &[ctx_param]);
                     }
-                    return Ok((snd_val, snd_pushed));
+                    Ok((snd_val, snd_pushed))
                 }
                 // A dynamic axis on 1-cell operands could resolve to 0 —
                 // sequential composition — which is not expressible as
                 // value-level composition.
                 None if fst_dim <= 1 => {
-                    return Err(LangError::engine(
+                    Err(LangError::engine(
                         "Seq: non-literal composition axis on 1-cell operands (dim ≤ 1) is not supported"
                             .to_string(),
-                    ));
+                    ))
                 }
                 // Pasting regime: every other case lowers to the shared
                 // `cell_comp_axis` op — including `k >= dim(fst)` and
@@ -950,7 +992,7 @@ fn compile_scheme_td(
                 // `apply_native` cannot carry `lit` (the `route_on_type`
                 // convention).
                 _ => {
-                    return compile_scheme_td(
+                    compile_scheme_td(
                         builder,
                         &TermData::op(
                             format!("cell_comp_axis:{fst_dim}"),
@@ -964,7 +1006,7 @@ fn compile_scheme_td(
                         pools,
                         ptr_type,
                         ffi_ops,
-                    );
+                    )
                 }
             }
         }
@@ -1308,6 +1350,7 @@ fn compile_scheme_td(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Compile a `Loop { body }` combinator to native IR.
 ///
 /// See the module-level "Loop native-code model" docs for the full strategy.
@@ -1332,7 +1375,7 @@ fn compile_loop(
     // incoming value (clone, not consume) and returns a freshly boxed copy.
     let saved_slot = builder.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
-        ptr_type.bytes() as u32,
+        ptr_type.bytes(),
         0,
     ));
     let saved_addr = builder.ins().stack_addr(ptr_type, saved_slot, 0);
@@ -1522,6 +1565,7 @@ fn compile_loop(
     Ok((builder.block_params(done_block)[0], false))
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Compile an `Arr` combinator. Returns the result `Value` and whether a scope
 /// was pushed (`extend_env` pushes; the caller pops).
 fn compile_arr(
@@ -1685,31 +1729,31 @@ fn compile_arr(
             //
             // This is a compile-time decision (op name and arg count are
             // known from the Term), so the IR contains only one path.
-            if let Some(op_code) = int_arith_op_code(op) {
-                if args.len() == 2 {
-                    let a_ptr = builder
-                        .ins()
-                        .load(ptr_type, MemFlags::trusted(), arg_ptrs, 0);
-                    let b_ptr = builder.ins().load(
-                        ptr_type,
-                        MemFlags::trusted(),
-                        arg_ptrs,
-                        ptr_type.bytes() as i32,
-                    );
-                    let op_code_val = builder.ins().iconst(types::I64, op_code as i64);
-                    let call = builder.ins().call(
-                        helpers.int_arith,
-                        &[
-                            ctx_param,
-                            op_code_val,
-                            op_idx_val,
-                            a_ptr,
-                            b_ptr,
-                            incoming_val,
-                        ],
-                    );
-                    return Ok((builder.inst_results(call)[0], false));
-                }
+            if let Some(op_code) = int_arith_op_code(op)
+                && args.len() == 2
+            {
+                let a_ptr = builder
+                    .ins()
+                    .load(ptr_type, MemFlags::trusted(), arg_ptrs, 0);
+                let b_ptr = builder.ins().load(
+                    ptr_type,
+                    MemFlags::trusted(),
+                    arg_ptrs,
+                    ptr_type.bytes() as i32,
+                );
+                let op_code_val = builder.ins().iconst(types::I64, op_code as i64);
+                let call = builder.ins().call(
+                    helpers.int_arith,
+                    &[
+                        ctx_param,
+                        op_code_val,
+                        op_idx_val,
+                        a_ptr,
+                        b_ptr,
+                        incoming_val,
+                    ],
+                );
+                return Ok((builder.inst_results(call)[0], false));
             }
 
             let call = builder.ins().call(
@@ -1768,10 +1812,10 @@ fn compile_arr(
             // Judgment ops (ADR-0054) are typecheck engine ops, not eval
             // engine ops — the eval engine does not dispatch them. This arm
             // should never be reached; return a compile-time error.
-            return Err(LangError::engine(format!(
+            Err(LangError::engine(format!(
                 "compile: judgment op '{}' is not supported by the eval engine (ADR-0054: judgment ops are dispatched by the typecheck engine)",
                 op
-            )));
+            )))
         }
     }
 }
@@ -1808,6 +1852,7 @@ fn int_arith_op_code(op: &str) -> Option<u64> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Compile a list of argument sub-schemes, packing the result pointers into a
 /// stack-allocated array. Each arg is compiled with the same incoming value.
 ///
@@ -1844,7 +1889,7 @@ fn compile_args_v2(
             .store(MemFlags::trusted(), null_val, slot_addr, offset);
     }
 
-    for i in 0..n {
+    for (i, arg) in args.iter().enumerate() {
         // Clone incoming for each arg so that multiple args don't share the
         // same consumable pointer. Without this, if two args are consuming
         // combinators (First/Choice/Loop/extend_env) they would both try to
@@ -1859,7 +1904,7 @@ fn compile_args_v2(
         };
         let (arg_ptr, arg_pushed) = compile_scheme_td(
             builder,
-            &args[i],
+            arg,
             ctx_param,
             arg_incoming,
             helpers,
@@ -1874,6 +1919,22 @@ fn compile_args_v2(
         builder
             .ins()
             .store(MemFlags::trusted(), arg_ptr, slot_addr, offset);
+        // A multi-shot `Suspended` is control flow (ADR-0158), not an
+        // operand failure: stop building the operand list and unwind so
+        // the journal driver sees the suspending op's index. Ordinary
+        // errors keep the deferred-evaluation behavior.
+        let susp = builder.ins().call(helpers.error_is_suspended, &[ctx_param]);
+        let is_susp = builder.inst_results(susp)[0];
+        let bail_block = builder.create_block();
+        let next_block = builder.create_block();
+        builder
+            .ins()
+            .brif(is_susp, bail_block, &[], next_block, &[]);
+        builder.switch_to_block(bail_block);
+        builder.seal_block(bail_block);
+        builder.ins().return_(&[null_val]);
+        builder.switch_to_block(next_block);
+        builder.seal_block(next_block);
     }
 
     Ok(slot_addr)

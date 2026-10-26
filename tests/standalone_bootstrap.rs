@@ -24,8 +24,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use hnl_engine_exec_cranelift::CraneliftEngine;
 use handl_test_utils::conformance::eval_corpus;
+use hnl_engine_exec_cranelift::CraneliftEngine;
 
 /// A unique temp path for a standalone executable, derived from the case
 /// name. Files are removed at the end of each test (best-effort).
@@ -49,8 +49,11 @@ fn run_exe(path: &PathBuf) -> (String, String, i32) {
 #[test]
 fn corpus_compiles_and_runs_standalone() {
     for case in eval_corpus() {
-        // Skip the foreign case — standalone mode has no host registry.
-        if case.name == "foreign" {
+        // Skip cases standalone mode cannot run: `foreign` needs a host
+        // registry, and `multishot_resume` needs a `Language` for arrow
+        // application (handler clauses run in the tree-walk interpreter,
+        // which the standalone driver has no language handle for).
+        if case.name == "foreign" || case.name == "multishot_resume" {
             continue;
         }
 

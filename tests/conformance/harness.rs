@@ -46,11 +46,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use handl_language::{Ast, AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language};
+use hnl_engine::TermData;
 use hnl_engine_exec::{EvalEngine, EvalRequest};
 use hnl_engine_exec_bytecode::BytecodeEngine;
 use hnl_engine_exec_cranelift::CraneliftEngine;
 use hnl_engine_exec_tree_walk::TreeWalkEngine;
-use hnl_engine::TermData;
 use serde_json::{Value, json};
 
 /// The four interpretation paths, in report column order.
@@ -234,15 +234,14 @@ fn instantiate_arrow_fixtures(v: &mut Value, nodes: &[ProbeNode]) {
         Value::Object(map) => {
             if map.get("__arrow__").and_then(|b| b.as_bool()) == Some(true)
                 && map.contains_key("body")
+                && let Some(idx) = map.get("body").and_then(|b| b.as_u64())
             {
-                if let Some(idx) = map.get("body").and_then(|b| b.as_u64()) {
-                    let node = &nodes[idx as usize];
-                    let mut arena = Ast::new();
-                    arena.push(AstNode::new(node.kind).with_payload(node.payload.clone()));
-                    map.remove("body");
-                    map.remove("env");
-                    map.insert("body_def".to_string(), handl_language::ast_value(&arena));
-                }
+                let node = &nodes[idx as usize];
+                let mut arena = Ast::new();
+                arena.push(AstNode::new(node.kind).with_payload(node.payload.clone()));
+                map.remove("body");
+                map.remove("env");
+                map.insert("body_def".to_string(), handl_language::ast_value(&arena));
             }
             for (_, val) in map.iter_mut() {
                 instantiate_arrow_fixtures(val, nodes);
@@ -317,12 +316,11 @@ pub fn build_probe(case: &Case) -> (Language, Ast) {
         }
     }
     let mut root_payload = json!({ "children": child_ids });
-    if let Some(extra) = &case.root_payload {
-        if let (Some(root_obj), Some(extra_obj)) = (root_payload.as_object_mut(), extra.as_object())
-        {
-            for (k, v) in extra_obj {
-                root_obj.insert(k.clone(), v.clone());
-            }
+    if let Some(extra) = &case.root_payload
+        && let (Some(root_obj), Some(extra_obj)) = (root_payload.as_object_mut(), extra.as_object())
+    {
+        for (k, v) in extra_obj {
+            root_obj.insert(k.clone(), v.clone());
         }
     }
     ast.push(AstNode::new("probe").with_payload(root_payload));

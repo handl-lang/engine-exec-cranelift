@@ -453,15 +453,32 @@ pub(crate) fn find_staticlib() -> Result<PathBuf, LangError> {
 
     let lib_name = "libhnl_engine_exec_cranelift.a";
 
+    // A stale archive is worse than a missing one: a newly added
+    // `helper_v2_*` symbol (e.g. one emitted by codegen) would be absent
+    // and the `cc` link would fail with `undefined reference`. `cargo
+    // test` does not rebuild the `staticlib` artifact, so treat an archive
+    // older than the crate's newest source file as missing.
+    let newest_src = newest_source_mtime(&PathBuf::from(&manifest_dir).join("src"));
+    let is_fresh = |path: &Path| -> bool {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        match (meta.modified().ok(), newest_src) {
+            // No mtime information — assume fresh (don't thrash rebuilds).
+            (None, _) | (_, None) => true,
+            (Some(archive), Some(src)) => archive >= src,
+        }
+    };
+
     // Check debug first (tests run in debug), then release.
     for profile in &["debug", "release"] {
         let path = PathBuf::from(target_dir).join(profile).join(lib_name);
-        if path.exists() {
+        if is_fresh(&path) {
             return Ok(path);
         }
     }
 
-    // Not found — build it.
+    // Not found (or stale) — build it.
     let build_status = Command::new("cargo")
         .args(["build", "-p", "hnl-engine-exec-cranelift"])
         .current_dir(&manifest_dir)
@@ -485,6 +502,32 @@ pub(crate) fn find_staticlib() -> Result<PathBuf, LangError> {
         "static library {} not found in {}/debug or {}/release",
         lib_name, target_dir, target_dir
     )))
+}
+
+/// Newest modification time among the `*.rs` files under `dir`
+/// (recursively), used to detect a stale static library.
+fn newest_source_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && let Ok(modified) = entry.metadata().and_then(|m| m.modified())
+            {
+                newest = Some(match newest {
+                    Some(current) => current.max(modified),
+                    None => modified,
+                });
+            }
+        }
+    }
+    newest
 }
 
 /// Link the C driver + cranelift-emitted object file + Rust staticlib into a

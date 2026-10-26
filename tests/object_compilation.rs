@@ -18,8 +18,8 @@
 
 use std::path::PathBuf;
 
-use hnl_engine_exec_cranelift::{CompileMode, CraneliftEngine, compile_all_nodes_object};
 use handl_test_utils::conformance::eval_corpus;
+use hnl_engine_exec_cranelift::{CompileMode, CraneliftEngine, compile_all_nodes_object};
 
 /// A unique temp path for a test object file, derived from the case name.
 ///
@@ -83,7 +83,7 @@ fn corpus_emits_valid_object_magic_bytes() {
         .expect("object compilation must succeed");
 
     let bytes = std::fs::read(&path).expect("object file must be readable");
-    assert!(bytes.len() > 0, "object file must be non-empty");
+    assert!(!bytes.is_empty(), "object file must be non-empty");
 
     // ELF magic: `\x7fELF` (Linux). Mach-O magic: `0xfeedfacf` (64-bit) or
     // `0xfeedface` (32-bit) (macOS). Either is a valid relocatable object on
@@ -94,7 +94,7 @@ fn corpus_emits_valid_object_magic_bytes() {
     assert!(
         is_elf || is_macho,
         "emitted file is not a recognized relocatable object (first 4 bytes: {:?})",
-        &bytes.get(0..4).unwrap_or(&[])
+        bytes.get(0..4).unwrap_or(&[])
     );
 
     let _ = std::fs::remove_file(&path);
