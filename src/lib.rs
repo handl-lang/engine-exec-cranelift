@@ -5,9 +5,9 @@
 //! This engine compiles [`handl_language::Term`] data to **native code** via
 //! [cranelift] and executes it via an in-memory JIT. It shares the same
 //! `Term` vocabulary as the
-//! [`hnl_engine_exec_tree_walk`](hnl_engine_exec_tree_walk)
+//! [`hnl_engine_exec_tree_walk`]
 //! reference interpreter and the
-//! [`hnl_engine_exec_bytecode`](hnl_engine_exec_bytecode)
+//! `hnl_engine_exec_bytecode`(hnl_engine_exec_bytecode)
 //! bytecode engine; conformance tests verify all three produce **identical
 //! results**.
 //!
@@ -869,7 +869,7 @@ unsafe fn box_value(value: TaggedValue) -> *mut TaggedValue {
 ///
 /// # Safety
 ///
-/// `ptr` must be a valid pointer returned by [`box_value`] (or
+/// `ptr` must be a valid pointer returned by `box_value` (or
 /// `Box::into_raw`).
 unsafe fn take_value(ptr: *mut TaggedValue) -> TaggedValue {
     debug_track_free(ptr);
@@ -1246,7 +1246,7 @@ fn eval_child_node(ctx: &mut EvalCtx, arena_idx: usize) -> Result<TaggedValue, L
     })
 }
 
-/// The recursive body of [`eval_child_node`], run under
+/// The recursive body of `eval_child_node`, run under
 /// [`stacker::maybe_grow`].
 fn eval_child_node_unguarded(
     ctx: &mut EvalCtx,
@@ -1472,7 +1472,7 @@ pub unsafe extern "C" fn helper_v2_load_payload(ctx: *mut EvalCtx) -> *mut Tagge
 /// calls the child's pre-compiled v2 native function. Child-node evaluation
 /// is a fresh computation: the child receives a null `incoming` — mirroring
 /// the tree-walk `eval_node_inner` and the bytecode `exec_node_inner`, which
-/// both pass `None`, and this backend's own [`eval_child_node`]. The caller's
+/// both pass `None`, and this backend's own `eval_child_node`. The caller's
 /// `incoming` operand is consumed (reclaimed) here because `proj_child`
 /// discards it — the flow value never crosses the node boundary. This is what
 /// lets a first-class `arr <op>` child (`eval.arr`, `Op { name: "$payload" }`)
@@ -2551,7 +2551,7 @@ const ARR_DISPATCH_TAG: &str = "__arr__";
 /// is dispatched through [`arr_dispatch`]; an absent one produces the
 /// first-class `{__arr__: {op}}` dispatch object that
 /// [`apply_closure_value_opts`] applies later. With args, falls through
-/// to [`apply_native_v2`] under the resolved name.
+/// to `apply_native_v2` under the resolved name.
 fn apply_payload_op(
     ctx: &mut EvalCtx,
     args: &[TaggedValue],
@@ -2687,7 +2687,7 @@ fn handler_impl(v: &TaggedValue, op: &str) -> Option<TaggedValue> {
 /// **Slow path** (either arg is not `Int`): falls back to the full
 /// [`helper_v2_apply_native`] path — looks up the op name from `op_idx`,
 /// collects the args into a `Vec`, clones `incoming`, and calls
-/// [`apply_native_v2`].
+/// `apply_native_v2`.
 ///
 /// # Op codes
 ///
@@ -2703,7 +2703,7 @@ fn handler_impl(v: &TaggedValue, op: &str) -> Option<TaggedValue> {
 /// # Safety
 ///
 /// `ctx` must be a valid `&mut EvalCtx`. `a_ptr` and `b_ptr` must be valid
-/// pointers returned by [`box_value`] (or null on error). `incoming` may be
+/// pointers returned by `box_value` (or null on error). `incoming` may be
 /// null. Both `a_ptr` and `b_ptr` are consumed (freed) on all paths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn helper_v2_int_arith(

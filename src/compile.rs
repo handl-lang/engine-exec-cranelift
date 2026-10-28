@@ -1,7 +1,7 @@
 //! # `Term` -> cranelift IR compilation (ADR-0052)
 //!
 //! This module compiles
-//! [`Term`](handl_language::Term) data — the arrow-calculus kernel — to
+//! [`Term`] data — the arrow-calculus kernel — to
 //! native code via cranelift, targeting the six combinators (`Arr`, `Seq`,
 //! `First`, `Choice`, `Loop`, `App`).
 //!
@@ -269,7 +269,7 @@ struct HelperRefs {
 /// This is the unified entry point dispatching to the JIT or object backend.
 /// For [`CompileMode::Jit`], the result holds callable function pointers.
 /// For [`CompileMode::Object`], the object file is written to `output_path`
-/// and the result's [`compiled`](CompiledResult::compiled) map is empty.
+/// and the result's `compiled` map is empty.
 ///
 /// # Errors
 ///
