@@ -24,7 +24,7 @@ handl-platform = { git = "https://github.com/handl-lang/host", branch = "main" }
 hnl-engine = { git = "https://github.com/handl-lang/engine", branch = "main" }
 hnl-engine-exec = { git = "https://github.com/handl-lang/engine-exec", branch = "main" }
 hnl-engine-exec-tree-walk = { git = "https://github.com/handl-lang/engine-exec-tree-walk", branch = "main" }
-handl-plugin-ffi = { git = "https://github.com/handl-lang/kit-ffi", branch = "main" }
+handl-plugin-ffi = { git = "https://github.com/handl-lang/host", branch = "main" }
 handl-runtime = { git = "https://github.com/handl-lang/host", branch = "main" }
 handl-value = { git = "https://github.com/handl-lang/kernel", branch = "main" }
 cranelift = { version = "0.115", features = ["frontend", "native"] }
