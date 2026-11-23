@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use handl_test_utils::conformance::eval_corpus;
-use hnl_engine_exec_cranelift::CraneliftEngine;
+use hnl_exec_cranelift::CraneliftEngine;
 
 /// A unique temp path for a standalone executable, derived from the case
 /// name. Files are removed at the end of each test (best-effort).

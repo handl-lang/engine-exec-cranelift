@@ -11,7 +11,7 @@
 //! task — the `.o` file is the deliverable. The object file declares the
 //! `helper_*` functions as external imports; a future linker step will link
 //! the object against a runtime stub library that exports those symbols (the
-//! `extern "C"` helpers in [`hnl_engine_exec_cranelift`]) plus a
+//! `extern "C"` helpers in [`hnl_exec_cranelift`]) plus a
 //! small `main` driver, producing a standalone executable. This file only
 //! verifies that compilation to a valid relocatable object succeeds for the
 //! full corpus.
@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use handl_test_utils::conformance::eval_corpus;
-use hnl_engine_exec_cranelift::{CompileMode, CraneliftEngine, compile_all_nodes_object};
+use hnl_exec_cranelift::{CompileMode, CraneliftEngine, compile_all_nodes_object};
 
 /// A unique temp path for a test object file, derived from the case name.
 ///
@@ -101,11 +101,11 @@ fn corpus_emits_valid_object_magic_bytes() {
 }
 
 /// [`CompileMode::Object`] constructs and round-trips through the unified
-/// [`hnl_engine_exec_cranelift::compile_all_nodes`] dispatcher,
+/// [`hnl_exec_cranelift::compile_all_nodes`] dispatcher,
 /// producing a non-empty file with an empty function-pointer map.
 #[test]
 fn compile_mode_object_dispatch_produces_file() {
-    use hnl_engine_exec_cranelift::compile_all_nodes;
+    use hnl_exec_cranelift::compile_all_nodes;
 
     let corpus = eval_corpus();
     let case = corpus

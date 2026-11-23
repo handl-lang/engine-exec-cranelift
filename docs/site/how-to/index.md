@@ -1,6 +1,6 @@
 # How-to guides
 
-Task recipes for `engine-exec-cranelift`.
+Task recipes for `exec-cranelift`.
 
 ## Run the gate
 
@@ -12,8 +12,8 @@ Task recipes for `engine-exec-cranelift`.
 ## Use it from Rust
 
 ```bash
-cargo add --git https://github.com/handl-lang/engine-exec-cranelift --branch main
+cargo add --git https://github.com/handl-lang/exec-cranelift --branch main
 ```
 
-See the [reference](/engine-exec-cranelift/reference/) for the types involved and the
-[explanation](/engine-exec-cranelift/explanation/) for why the crate is shaped this way.
+See the [reference](/exec-cranelift/reference/) for the types involved and the
+[explanation](/exec-cranelift/explanation/) for why the crate is shaped this way.

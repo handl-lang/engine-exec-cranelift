@@ -47,10 +47,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use handl_language::{Ast, AstNode, AstShapeDef, ChildRoleSpec, EvalSchemeDef, Language};
 use hnl_engine::TermData;
-use hnl_engine_exec::{EvalEngine, EvalRequest};
-use hnl_engine_exec_bytecode::BytecodeEngine;
-use hnl_engine_exec_cranelift::CraneliftEngine;
-use hnl_engine_exec_tree_walk::TreeWalkEngine;
+use hnl_exec::{EvalEngine, EvalRequest};
+use hnl_exec_bytecode::BytecodeEngine;
+use hnl_exec_cranelift::CraneliftEngine;
+use hnl_exec_tree_walk::TreeWalkEngine;
 use serde_json::{Value, json};
 
 /// The four interpretation paths, in report column order.

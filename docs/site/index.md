@@ -1,4 +1,4 @@
-# engine-exec-cranelift
+# exec-cranelift
 
 The Cranelift backend for eval: compiles schemes to native code (JIT in-process, or an object file for a standalone binary).
 
@@ -8,9 +8,9 @@ A **eval engine** in the `engine-*` family. Speed is the only thing it may chang
 
 ## Start here
 
-- **Reference** — [public API](/engine-exec-cranelift/reference/)
-- **How-to** — [task recipes](/engine-exec-cranelift/how-to/)
-- **Explanation** — [design and rationale](/engine-exec-cranelift/explanation/)
+- **Reference** — [public API](/exec-cranelift/reference/)
+- **How-to** — [task recipes](/exec-cranelift/how-to/)
+- **Explanation** — [design and rationale](/exec-cranelift/explanation/)
 
 No tutorials: this repo is a building block used from Rust. End-to-end
 walkthroughs live with the product that composes it — see the

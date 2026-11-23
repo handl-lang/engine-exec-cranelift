@@ -74,7 +74,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use handl_language::Value as JsonValue;
 use handl_language::{ArrSource, Ast, LangError, Language, SchemeVersion, Term};
 use hnl_engine::TermData;
-use hnl_engine_exec::native_ops;
+use hnl_exec::native_ops;
 
 /// Type alias for a compiled native function pointer.
 ///

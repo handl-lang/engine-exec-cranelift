@@ -9,7 +9,7 @@ the `engine-*` contract for this slot exposes.
 
 | crate | role |
 |---|---|
-| `hnl-engine-exec-cranelift` | eval engine |
+| `hnl-exec-cranelift` | eval engine |
 
 ## Build and test
 

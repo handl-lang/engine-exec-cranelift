@@ -1,17 +1,17 @@
-# engine-exec-cranelift
+# exec-cranelift
 
 The Cranelift backend for the eval operation: compiles a node's schemes to
 native code (JIT in-process, or an object file for a standalone binary) instead
 of walking them.
 
 An `engine-*` crate: a concrete eval engine — the fastest `EvalEngine`
-implementation, checked value-for-value against `engine-exec-tree-walk` (the
+implementation, checked value-for-value against `exec-tree-walk` (the
 oracle). Arrow bodies fall back to the reference interpreter — that is the one
 documented dependency on a sibling backend.
 
 ```rust
-use hnl_engine_exec::EvalEngine;
-use hnl_engine_exec_cranelift::CraneliftEngineV2;
+use hnl_exec::EvalEngine;
+use hnl_exec_cranelift::CraneliftEngineV2;
 
 let value = CraneliftEngineV2::new().eval(&lang, &request)?;
 ```
@@ -32,4 +32,4 @@ MIT.
 
 ## Documentation
 
-<https://handl-lang.github.io/docs/engine-exec-cranelift/>
+<https://handl-lang.github.io/docs/exec-cranelift/>
