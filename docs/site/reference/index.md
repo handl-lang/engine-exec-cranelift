@@ -3,7 +3,7 @@
 ## Public API
 
 Run `cargo doc --no-deps` for the full surface; the entry points are the ones
-the `engine-*` contract for this slot exposes.
+the `exec-*` contract for this slot exposes.
 
 ## Crate
 

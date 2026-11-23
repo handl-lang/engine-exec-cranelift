@@ -6,7 +6,7 @@ Speed is the only thing it may change: it must agree value-for-value with the re
 
 ## Where it sits
 
-This crate belongs to the `engine-*` family. Plugins, kits and hosts reach it
+This crate belongs to the `exec-*` family. Plugins, kits and hosts reach it
 through the kit's slot, so it can be swapped without touching a language
 definition.
 

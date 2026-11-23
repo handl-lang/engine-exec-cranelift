@@ -4,7 +4,7 @@ The Cranelift backend for eval: compiles schemes to native code (JIT in-process,
 
 ## What it is
 
-A **eval engine** in the `engine-*` family. Speed is the only thing it may change: it must agree value-for-value with the reference tree-walk interpreter, and the conformance suite enforces that. Arrow bodies fall back to the reference interpreter.
+A **eval engine** in the `exec-*` family. Speed is the only thing it may change: it must agree value-for-value with the reference tree-walk interpreter, and the conformance suite enforces that. Arrow bodies fall back to the reference interpreter.
 
 ## Start here
 

@@ -4,7 +4,7 @@ The Cranelift backend for the eval operation: compiles a node's schemes to
 native code (JIT in-process, or an object file for a standalone binary) instead
 of walking them.
 
-An `engine-*` crate: a concrete eval engine — the fastest `EvalEngine`
+An `exec-*` crate: a concrete eval engine — the fastest `EvalEngine`
 implementation, checked value-for-value against `exec-tree-walk` (the
 oracle). Arrow bodies fall back to the reference interpreter — that is the one
 documented dependency on a sibling backend.
