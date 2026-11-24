@@ -2777,10 +2777,8 @@ pub unsafe extern "C" fn helper_v2_int_arith(
         for ptr in [a_ptr, b_ptr] {
             if ptr.is_null() {
                 // Error already set; consume remaining args.
-                for remaining in [b_ptr] {
-                    if !remaining.is_null() {
-                        let _ = take_value(remaining);
-                    }
+                if !b_ptr.is_null() {
+                    let _ = take_value(b_ptr);
                 }
                 return std::ptr::null_mut();
             }
