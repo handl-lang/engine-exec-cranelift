@@ -1532,7 +1532,7 @@ pub fn cases() -> Vec<Case> {
         op("eval_block", vec![]),
         None,
         engines_ok(json!(15)),
-        "`do { y = 5; y + 10 }` shape: the two-child `assign` child binds \
+        "`do { y := 5; y + 10 }` shape: the two-child `assign` child binds \
          `y` into the block scope (`env_assign`), the trailing expr reads \
          it → 15. Leading leaf children are inert statements.",
     ));
@@ -1542,7 +1542,7 @@ pub fn cases() -> Vec<Case> {
         op("eval_rec", vec![]),
         None,
         engines_ok(json!(11)),
-        "`rec` region: `n = 1` seeds from the enclosing scope (Null), \
+        "`rec` region: `n := 1` seeds from the enclosing scope (Null), \
          defines `n` on pass 1, converges on pass 2 (`rec_value_eq`), \
          last child `n + 10` → 11.",
     ));
