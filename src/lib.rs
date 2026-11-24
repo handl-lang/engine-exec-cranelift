@@ -1142,7 +1142,13 @@ pub unsafe extern "C" fn helper_call_foreign(
         };
 
         // Convert TaggedValue args to serde_json::Value for the host boundary.
-        let val_args: Vec<Value> = arg_vals.iter().map(tagged_to_value).collect();
+        // T-153: elide a leading `null` filling a `type.unit` signature
+        // domain — `f(null)` ≡ `f()`.
+        let val_args: Vec<Value> = handl_platform::elide_unit_args(
+            &*modules,
+            &name,
+            arg_vals.iter().map(tagged_to_value).collect(),
+        );
         // Call the module function.
         let mut pctx = handl_platform::EvalContext::new();
         match func.call(&val_args, &mut pctx) {
@@ -2084,10 +2090,16 @@ fn prim_v2_flow(ctx: &mut EvalCtx, args: &[TaggedValue]) -> *mut TaggedValue {
                 )));
             }
         };
-        let call_args: Vec<Value> = actual_args
-            .iter()
-            .map(handl_value::tagged_to_value)
-            .collect();
+        // T-153: elide a leading `null` filling a `type.unit` signature
+        // domain — `f(null)` ≡ `f()`.
+        let call_args: Vec<Value> = handl_platform::elide_unit_args(
+            &**modules,
+            name.as_ref(),
+            actual_args
+                .iter()
+                .map(handl_value::tagged_to_value)
+                .collect(),
+        );
         let mut pctx = handl_platform::EvalContext::new();
         match func.call(&call_args, &mut pctx) {
             Ok(v) => unsafe { box_value(TaggedValue::from(v)) },
@@ -3647,7 +3659,13 @@ fn apply_native_v2(
             };
             let call_args: Vec<Value> = match arg_src {
                 Some(TaggedValue::Arr(arr)) => {
-                    arr.iter().map(handl_value::tagged_to_value).collect()
+                    // T-153: elide a leading `null` filling a `type.unit`
+                    // signature domain — `f(null)` ≡ `f()`.
+                    handl_platform::elide_unit_args(
+                        &**modules,
+                        &callee,
+                        arr.iter().map(handl_value::tagged_to_value).collect(),
+                    )
                 }
                 _ => Vec::new(),
             };
