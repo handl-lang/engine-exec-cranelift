@@ -134,7 +134,8 @@ fn null_incoming_ptr() -> *mut TaggedValue {
 use handl_language::{Ast, AstNode, AstRef, LangError, Language, SchemeVersion, Term, Value};
 use handl_value::{TaggedValue, either_value, is_either_left, is_either_right, tagged_to_value};
 use hnl_exec::native_ops::{
-    self, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome, step_decision,
+    self, ClosureParams, NativeOpCtx, OpService, build_loop_step_args, is_truthy, loop_step_outcome,
+    step_decision,
 };
 use hnl_exec::pattern_match::{self, PatternMatchCtx};
 use hnl_exec::{EvalEngine, EvalRequest, ImportResolver};
@@ -2999,11 +3000,7 @@ impl NativeOpCtx for ClCtx<'_> {
         unsafe { (*self.ctx.lang).literal_child(&parent_kind, role, &child_kind) }
     }
 
-    fn closure_params_at(
-        &mut self,
-        r: AstRef,
-    ) -> Result<(Vec<String>, Option<String>, bool), LangError> {
-        let node = self.ctx.ast_at(r)?;
+    fn closure_params_at(&mut self, r: AstRef) -> Result<ClosureParams, LangError> {
         // SAFETY: ctx.lang/ctx.ast are valid pointers for the duration of
         // run_native; `lang` is null for the standalone driver, which has
         // no shape data to resolve params against — report it cleanly
@@ -3014,8 +3011,7 @@ impl NativeOpCtx for ClCtx<'_> {
             ));
         };
         let ast = unsafe { &*self.ctx.ast };
-        let (names, rest) = lang.param_names(ast, node)?;
-        Ok((names, rest, lang.is_array_pattern(node)))
+        hnl_exec::native_ops::resolve_closure_params(lang, ast, r)
     }
 
     fn closure_body_def(
